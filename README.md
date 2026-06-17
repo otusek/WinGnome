@@ -1,5 +1,7 @@
 # WinGnome
 
+> Yes, the project is vibecoded. Yes, I know what I'm doing. Yes, the code is still a mess. Yes, I will optimize it.
+
 Niestandardowa powłoka (shell) dla **Windows 11**, inspirowana środowiskiem GNOME. Zastępuje domyślny `explorer.exe` własnym pulpitem, tapetą i górnym paskiem (`bar`).
 
 ## Cel projektu
