@@ -1,0 +1,11 @@
+build/
+.vs/
+*.vcxproj.user
+*.suo
+*.user
+*.opendb
+*.VC.db
+*.VC.db-*
+ipch/
+.clangd
+compile_commands.json

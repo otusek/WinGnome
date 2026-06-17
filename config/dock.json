@@ -1,0 +1,28 @@
+{
+  "enabled": true,
+  "height": 56,
+  "icon_size": 40,
+  "icon_spacing": 6,
+  "padding_h": 14,
+  "padding_v": 8,
+  "margin_bottom": 10,
+  "corner_radius": 18,
+  "background": "#241f31",
+  "background_alpha": 215,
+  "autohide": true,
+  "autohide_trigger_px": 4,
+  "show_activities": true,
+  "show_running_apps": true,
+  "activities_command": "",
+  "pinned": [
+    "C:\\Windows\\explorer.exe",
+    "C:\\Windows\\System32\\notepad.exe",
+    "C:\\Windows\\System32\\calc.exe"
+  ],
+  "performance": {
+    "vsync": true,
+    "data_tick_ms": 500,
+    "idle_sleep_ms": 100,
+    "anim_fps": 60
+  }
+}

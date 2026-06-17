@@ -1,0 +1,37 @@
+{
+  "height": 32,
+  "background": "#241f31",
+  "foreground": "#ffffff",
+  "font": "Segoe UI",
+  "font_size": 11,
+  "clock_format": "%a %d %b",
+  "activities_command": "",
+  "modules-left": [],
+  "modules-center": ["clock"],
+  "modules-right": ["system"],
+  "performance": {
+    "vsync": true,
+    "data_tick_ms": 1000,
+    "idle_sleep_ms": 100,
+    "anim_fps": 30
+  },
+  "animations": {
+    "frame_ms": 16,
+    "modules": {
+      "volume": {
+        "step": 0.05,
+        "slider_width": 90,
+        "slider_height": 6,
+        "scroll_adjust": true,
+        "drag_adjust": true,
+        "click_toggles_mute": false,
+        "animations": {
+          "hover_fade_ms": 150,
+          "slider_expand_ms": 220,
+          "pulse_on_mute": true,
+          "pulse_speed_hz": 1.5
+        }
+      }
+    }
+  }
+}
