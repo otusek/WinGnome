@@ -2,51 +2,51 @@
 
 > Yes, the project is vibecoded. Yes, I know what I'm doing. Yes, the code is still a mess. Yes, I will optimize it.
 
-Niestandardowa powłoka (shell) dla **Windows 11**, inspirowana środowiskiem GNOME. Zastępuje domyślny `explorer.exe` własnym pulpitem, tapetą i górnym paskiem (`bar`).
+A custom **Windows 11** shell inspired by GNOME. Replaces the default `explorer.exe` with a custom desktop, wallpaper, top bar, and dock.
 
-## Cel projektu
+## Project goals
 
-WinGnome dostarcza minimalną, rozszerzalną powłokę graficzną:
+WinGnome provides a minimal, extensible graphical shell:
 
-- **Desktop** — pełnoekranowe okno pulpitu pod paskiem
-- **Wallpaper** — wyświetlanie tapety systemowej lub własnej ścieżki
-- **Bar** — konfigurowalny górny pasek (moduły: zegar, bateria, sieć, głośność itd.)
-- **Dock** — dolny pasek w stylu Dash to Dock (przypięte i uruchomione aplikacje, autoukrywanie)
+- **Desktop** — fullscreen desktop window below the bar
+- **Wallpaper** — system wallpaper or a custom image path
+- **Bar** — configurable top panel (modules: clock, battery, network, volume, etc.)
+- **Dock** — Dash to Dock-style bottom panel (pinned and running apps, autohide)
 
-Projekt jest w fazie MVP — kolejne kroki to ikony pulpitu, menu kontekstowe i pełna zamiana Explorera.
+The project is in MVP stage — next steps are desktop icons, a context menu, and full Explorer replacement.
 
-## Wymagania
+## Requirements
 
-- Windows 11 (działa też na Windows 10)
-- [Visual Studio 2022](https://visualstudio.microsoft.com/) z workloadem **Desktop development with C++**
+- Windows 11 (also works on Windows 10)
+- [Visual Studio 2022](https://visualstudio.microsoft.com/) with the **Desktop development with C++** workload
 - [CMake](https://cmake.org/download/) 3.16+
-- Windows SDK 10.0.26100 lub nowszy
+- Windows SDK 10.0.26100 or newer
 
-## Struktura katalogów
+## Directory structure
 
 ```
 WinGnome/
-├── CMakeLists.txt          # konfiguracja builda
+├── CMakeLists.txt          # build configuration
 ├── README.md
 ├── config/
-│   ├── bar.json            # konfiguracja paska (poprzednio waybar.json)
-│   ├── dock.json           # konfiguracja docka
-│   └── shell.json          # tapeta i ustawienia pulpitu
+│   ├── bar.json            # bar configuration (formerly waybar.json)
+│   ├── dock.json           # dock configuration
+│   └── shell.json          # wallpaper and desktop settings
 └── src/
-    ├── main.cpp            # punkt wejścia (wWinMain)
-    ├── shell.cpp           # orchestracja komponentów
-    ├── desktop.cpp         # okno pulpitu
-    ├── wallpaper.cpp       # ładowanie i rysowanie tapety
-    ├── bar.cpp             # górny pasek (poprzednio waybar)
-    ├── bar_modules.cpp     # moduły paska
-    ├── bar_config.cpp      # parser konfiguracji
-    ├── json.cpp            # minimalny parser JSON
-    └── paths.cpp           # ścieżki do plików konfiguracyjnych
+    ├── main.cpp            # entry point (wWinMain)
+    ├── shell.cpp           # component orchestration
+    ├── desktop.cpp         # desktop window
+    ├── wallpaper.cpp       # wallpaper loading and rendering
+    ├── bar.cpp             # top bar (formerly waybar)
+    ├── bar_modules.cpp     # bar modules
+    ├── bar_config.cpp      # configuration parser
+    ├── json.cpp            # minimal JSON parser
+    └── paths.cpp           # config and asset path resolution
 ```
 
-## Instrukcja uruchomienia
+## Getting started
 
-### 1. Klonowanie i kompilacja
+### 1. Clone and build
 
 ```powershell
 git clone <repo-url> WinGnome
@@ -55,67 +55,72 @@ cmake -B build
 cmake --build build --config Release
 ```
 
-### 2. Uruchomienie (test bez zamiany shella)
+### 2. Run (without replacing the shell)
 
 ```powershell
 .\build\Release\wingnome.exe
 ```
 
-Pliki `config\bar.json`, `config\dock.json` i `config\shell.json` są kopiowane automatycznie do `build\Release\config\`.
+`config\bar.json`, `config\dock.json`, and `config\shell.json` are copied automatically to `build\Release\config\`.
 
-### 3. Konfiguracja tapety
+### 3. Wallpaper configuration
 
-Edytuj `config\shell.json`:
+Edit `config\shell.json`:
 
 ```json
 {
-  "wallpaper": "C:\\Users\\Ty\\Pictures\\tapeta.jpg",
+  "wallpaper": "C:\\Users\\You\\Pictures\\wallpaper.jpg",
   "desktop_enabled": 1
 }
 ```
 
-Puste `"wallpaper": ""` — używa aktualnej tapety systemowej Windows.
+An empty `"wallpaper": ""` uses the current Windows system wallpaper.
 
-### 4. Konfiguracja paska
+### 4. Bar configuration
 
-Edytuj `config\bar.json` — sekcje `modules-left`, `modules-center`, `modules-right` (jak w Waybarze na Linuxie).
+Edit `config\bar.json` — use `modules-left`, `modules-center`, and `modules-right` sections (similar to Waybar on Linux).
 
-## Instalacja jako shell (Windows 11)
+### 5. Dock configuration
 
-> **Uwaga:** Zamiana shella wymaga kopii zapasowej rejestru. Testuj najpierw przez zwykłe uruchomienie exe.
+Edit `config\dock.json` — pinned apps, icon size, autohide, and visual settings.
 
-1. Skompiluj projekt w konfiguracji **Release**.
-2. Skopiuj `wingnome.exe` i folder `config\` do stałej lokalizacji, np. `C:\WinGnome\`.
-3. Otwórz **Registry Editor** (`regedit`).
-4. Przejdź do:
+## Installing as the shell (Windows 11)
+
+> **Note:** Replacing the shell requires a registry backup. Test by running the exe normally first.
+
+1. Build the project in **Release** configuration.
+2. Copy `wingnome.exe` and the `config\` folder to a permanent location, e.g. `C:\WinGnome\`.
+3. Open **Registry Editor** (`regedit`).
+4. Go to:
    ```
    HKEY_CURRENT_USER\Software\Microsoft\Windows NT\CurrentVersion\Winlogon
    ```
-   lub (shell dla bieżącej sesji):
+   or (shell for the current session):
    ```
    HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer
    ```
-5. Ustaw wartość `Shell` na pełną ścieżkę do `wingnome.exe`.
-6. Wyloguj się i zaloguj ponownie.
+5. Set the `Shell` value to the full path of `wingnome.exe`.
+6. Sign out and sign back in.
 
-Aby przywrócić Explorer:
-- Usuń wartość `Shell` lub ustaw `explorer.exe`, potem restart sesji.
+To restore Explorer:
+- Remove the `Shell` value or set it to `explorer.exe`, then restart the session.
 
-## Testowanie
+## Testing
 
-1. Uruchom `wingnome.exe` — powinien pojawić się pulpit z tapetą i górny pasek.
-2. Sprawdź moduły na pasku: zegar, bateria, sieć.
-3. Zmień `config\bar.json` (np. kolor tła) i uruchom ponownie.
-4. Ustaw własną tapetę w `config\shell.json` i zweryfikuj wyświetlanie.
+1. Run `wingnome.exe` — you should see the desktop wallpaper, top bar, and dock.
+2. Check bar modules: clock, battery, network.
+3. Change `config\bar.json` (e.g. background color) and restart.
+4. Set a custom wallpaper in `config\shell.json` and verify it displays.
+5. Hover the bottom screen edge to show the dock (if autohide is enabled).
 
-## Wybór technologii
+## Technology choices
 
-Projekt używa **C++17 + Win32 API** — najlepszy wybór dla shella Windows:
+The project uses **C++17 + Win32 API** — a solid fit for a Windows shell:
 
-- bezpośredni dostęp do Win32/COM (tapeta, audio, sieć)
-- jeden natywny plik wykonywalny bez runtime
-- niska latencja i pełna kontrola nad oknami
+- direct access to Win32/COM (wallpaper, audio, network)
+- a single native executable with no runtime dependency
+- low latency and full control over windows
 
-## Licencja
+## License
 
-Zgodnie z repozytorium projektu.
+See the project repository.
