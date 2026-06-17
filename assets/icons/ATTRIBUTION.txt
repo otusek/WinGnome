@@ -6,3 +6,7 @@ and renamed for WinGnome.
 screenshot.svg = camera-photo-symbolic.svg
 settings.svg = preferences-system-symbolic.svg
 power.svg = system-shutdown-symbolic.svg
+power-off.svg = system-shutdown-symbolic.svg
+restart.svg = system-reboot-symbolic.svg
+logout.svg = system-log-out-symbolic.svg
+activities.svg = view-app-grid-symbolic.svg

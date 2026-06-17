@@ -1,11 +1,13 @@
 #pragma once
 
 #include "platform.h"
+#include "audio_volume.h"
 #include "bar_config.h"
+#include "gfx/d2d_window.h"
+#include "gfx/gfx_font.h"
+#include "gfx/types.h"
+#include "svg_icons.h"
 
-#include <SFML/Graphics.hpp>
-
-#include <functional>
 #include <memory>
 #include <string>
 
@@ -13,27 +15,41 @@ namespace wingnome {
 
 class BarPopup;
 
+struct IBarHost {
+    virtual ~IBarHost() = default;
+    virtual void openSystemMenu(const GfxRect& anchor) = 0;
+    virtual void openActivities() = 0;
+    virtual bool systemMenuVisible() const = 0;
+    virtual void hideSystemMenu() = 0;
+};
+
 struct ModuleContext {
     const BarConfig* config{nullptr};
-    sf::Font* font{nullptr};
+    GfxFont* font{nullptr};
+    D2dWindow* window{nullptr};
+    SvgIconCache* icons{nullptr};
+    AudioVolume* audio{nullptr};
+    IBarHost* host{nullptr};
     unsigned fontSize{11};
     int barHeight{32};
     float deltaTime{0.f};
-    BarPopup* popup{nullptr};
 };
 
 struct ModulePaintInfo {
-    sf::RenderTarget& target;
+    D2dWindow& window;
     const ModuleContext& ctx;
-    sf::FloatRect bounds;
-    sf::Color fg;
+    GfxRect bounds;
+    GfxColor fg;
+    float reveal{1.f};
+    bool hovered{false};
 };
 
 struct ModuleInput {
-    sf::Vector2i mousePos;
+    GfxVec2i mousePos;
     bool hovered{false};
     bool pressed{false};
     bool dragging{false};
+    short wheelDelta{0};
 };
 
 class IModule {
@@ -43,17 +59,19 @@ public:
     virtual std::wstring label() const { return id(); }
     virtual bool interactive() const { return false; }
     virtual void tick() {}
-    virtual void update(const ModuleInput& input, const sf::FloatRect& bounds) { (void)input; (void)bounds; }
-    virtual sf::Vector2f measure() const = 0;
+    virtual void update(const ModuleInput& input, const GfxRect& bounds) {
+        (void)input;
+        (void)bounds;
+    }
+    virtual GfxSize measure() const = 0;
     virtual void paint(const ModulePaintInfo& info) const = 0;
-    virtual void onClick(const sf::Vector2i&, const sf::FloatRect&) {}
-    virtual void onScroll(const sf::Vector2i&, float delta, const sf::FloatRect&) { (void)delta; }
+    virtual void onClick(const GfxVec2i&, const GfxRect&) {}
+    virtual void onScroll(const GfxVec2i&, float delta, const GfxRect&) { (void)delta; }
     virtual bool isAnimating() const { return false; }
     virtual bool layoutAffectsMeasure() const { return false; }
 };
 
 std::unique_ptr<IModule> createModule(const std::wstring& name, ModuleContext* ctx);
-sf::String toSfString(const std::wstring& text);
-sf::Color toSfColor(COLORREF color, sf::Uint8 alpha = 255);
+GfxColor toGfxColor(COLORREF color, uint8_t alpha = 255);
 
 }  // namespace wingnome

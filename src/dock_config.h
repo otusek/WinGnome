@@ -1,8 +1,9 @@
 #pragma once
 
 #include "platform.h"
-#include "bar_config.h"
 #include "json.h"
+
+#include <windows.h>
 
 #include <filesystem>
 #include <optional>
@@ -11,29 +12,36 @@
 
 namespace wingnome {
 
+struct DockPerformanceConfig {
+    int dataTickMs{1000};
+    int idleSleepMs{100};
+    int animFps{60};
+};
+
 struct DockConfig {
     bool enabled{true};
     int height{56};
     int iconSize{40};
     int iconSpacing{6};
     int paddingH{14};
-    int paddingV{8};
-    int marginBottom{10};
     int cornerRadius{18};
     COLORREF background{RGB(36, 31, 49)};
-    int backgroundAlpha{215};
-    bool autohide{true};
-    int autohideTriggerPx{4};
+    float backgroundOpacity{0.88f};
+    bool backgroundBlur{false};
+    bool transparentWindow{true};
+    bool useAdwaitaIcons{true};
+    bool autohide{false};
+    int autohideDelayMs{350};
     bool showActivities{true};
-    bool showRunningApps{true};
     std::wstring activitiesCommand;
     std::vector<std::wstring> pinned;
-    PerformanceConfig performance;
+    DockPerformanceConfig performance;
 
     static DockConfig load(const std::filesystem::path& path);
 
 private:
     static std::optional<COLORREF> parseColor(const std::wstring& s);
+    static std::vector<std::wstring> stringList(const JsonArray& arr);
 };
 
 }  // namespace wingnome

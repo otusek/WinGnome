@@ -1,25 +1,84 @@
 #pragma once
 
 #include "platform.h"
+#include "audio_volume.h"
+#include "bar_anim.h"
 #include "bar_config.h"
-#include "bar_modules.h"
-
-#include <SFML/Graphics.hpp>
-
 #include "bar_popup.h"
+#include "gfx/d2d_window.h"
+#include "gfx/frame_timer.h"
+#include "gfx/gfx_font.h"
+#include "gfx/types.h"
+#include "paths.h"
+#include "svg_icons.h"
 
 #include <filesystem>
 #include <memory>
+#include <string>
 #include <vector>
-
-struct HWND__;
-using HWND = HWND__*;
 
 namespace wingnome {
 
-constexpr unsigned WM_BAR_RELOAD = 0x8001;
+struct IBarHost {
+    virtual ~IBarHost() = default;
+    virtual void openSystemMenu(const GfxRect& anchor) = 0;
+    virtual void openActivities() = 0;
+    virtual bool systemMenuVisible() const = 0;
+    virtual void hideSystemMenu() = 0;
+};
 
-class Bar {
+struct ModuleContext {
+    const BarConfig* config{nullptr};
+    GfxFont* font{nullptr};
+    D2dWindow* window{nullptr};
+    SvgIconCache* icons{nullptr};
+    AudioVolume* audio{nullptr};
+    IBarHost* host{nullptr};
+    unsigned fontSize{11};
+    int barHeight{32};
+    float deltaTime{0.f};
+};
+
+struct ModulePaintInfo {
+    D2dWindow& window;
+    const ModuleContext& ctx;
+    GfxRect bounds;
+    GfxColor fg;
+    float reveal{1.f};
+    bool hovered{false};
+};
+
+struct ModuleInput {
+    GfxVec2i mousePos;
+    bool hovered{false};
+    bool pressed{false};
+    bool dragging{false};
+    short wheelDelta{0};
+};
+
+class IModule {
+public:
+    virtual ~IModule() = default;
+    virtual std::wstring id() const = 0;
+    virtual std::wstring label() const { return id(); }
+    virtual bool interactive() const { return false; }
+    virtual void tick() {}
+    virtual void update(const ModuleInput& input, const GfxRect& bounds) {
+        (void)input;
+        (void)bounds;
+    }
+    virtual GfxSize measure() const = 0;
+    virtual void paint(const ModulePaintInfo& info) const = 0;
+    virtual void onClick(const GfxVec2i&, const GfxRect&) {}
+    virtual void onScroll(const GfxVec2i&, float delta, const GfxRect&) { (void)delta; }
+    virtual bool isAnimating() const { return false; }
+    virtual bool layoutAffectsMeasure() const { return false; }
+};
+
+std::unique_ptr<IModule> createModule(const std::wstring& name, ModuleContext* ctx);
+GfxColor toGfxColor(COLORREF color, uint8_t alpha = 255);
+
+class Bar : public IBarHost {
 public:
     bool create();
     void destroy();
@@ -29,34 +88,45 @@ public:
     int height() const { return config_.height; }
     int idleSleepMs() const { return config_.performance.idleSleepMs; }
 
+    HWND popupHwnd() const;
+    void handleMouseWheel(short delta, const POINT& screenPos);
+
+    void openSystemMenu(const GfxRect& anchor) override;
+    void openActivities() override;
+    bool systemMenuVisible() const override;
+    void hideSystemMenu() override;
+
 private:
     struct PlacedModule {
         IModule* module{nullptr};
-        sf::FloatRect bounds;
+        GfxRect bounds;
     };
 
     bool open_{false};
     bool dirty_{true};
     bool layoutDirty_{true};
-    sf::RenderWindow window_;
-    sf::Font font_;
-    sf::Clock frameClock_;
-    sf::Clock animClock_;
-    sf::Clock dataClock_;
+    int hoveredIndex_{-1};
+    D2dWindow window_;
+    GfxFont font_;
+    SvgIconCache icons_;
+    AudioVolume audio_;
+    BarPopup popup_;
+    FrameTimer frameTimer_;
+    FrameTimer animTimer_;
+    FrameTimer dataTimer_;
     BarConfig config_;
     std::filesystem::path configPath_;
+    ConfigChangeDetect configWatch_{};
     ModuleContext ctx_;
     std::vector<std::unique_ptr<IModule>> left_;
     std::vector<std::unique_ptr<IModule>> center_;
     std::vector<std::unique_ptr<IModule>> right_;
     std::vector<PlacedModule> layout_;
-    BarPopup popup_;
-    IModule* captureModule_{nullptr};
-    bool mouseDown_{false};
-    sf::Vector2i mousePos_{};
+    AnimChannel revealAnim_;
 
     bool loadFont();
     void reloadConfig();
+    void checkConfigChanged();
     void rebuildModules();
     void tickModules();
     void buildLayout();
@@ -64,10 +134,11 @@ private:
     void updateModules();
     bool anyAnimating() const;
     bool render();
-    PlacedModule* moduleAt(const sf::Vector2i& pos);
-    void setupPopupActions();
     void applyTopmost();
     void markDirty();
+    int screenWidth() const;
+    int moduleAt(const GfxVec2i& pos, float slideY) const;
+    GfxVec2i adjustedMousePos() const;
 };
 
 }  // namespace wingnome

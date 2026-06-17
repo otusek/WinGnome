@@ -35,12 +35,13 @@ WinGnome/
 └── src/
     ├── main.cpp            # entry point (wWinMain)
     ├── shell.cpp           # component orchestration
+    ├── gfx/                # Direct2D window, fonts, frame timer
+    ├── bar.cpp             # top bar and modules
+    ├── bar_modules.cpp     # bar module implementations
+    ├── dock.cpp            # bottom dock
+    ├── svg_icons.cpp       # SVG → ID2D1Bitmap (nanosvg)
     ├── desktop.cpp         # desktop window
     ├── wallpaper.cpp       # wallpaper loading and rendering
-    ├── bar.cpp             # top bar (formerly waybar)
-    ├── bar_modules.cpp     # bar modules
-    ├── bar_config.cpp      # configuration parser
-    ├── json.cpp            # minimal JSON parser
     └── paths.cpp           # config and asset path resolution
 ```
 
@@ -51,9 +52,13 @@ WinGnome/
 ```powershell
 git clone <repo-url> WinGnome
 cd WinGnome
-cmake -B build
+cmake -B build -G "Visual Studio 18 2026" -A x64
 cmake --build build --config Release
 ```
+
+On VS 2022 use `-G "Visual Studio 17 2022"` instead.
+
+If you previously built with SFML, delete the old `build\` folder first so CMake does not reuse stale artifacts.
 
 ### 2. Run (without replacing the shell)
 
@@ -78,7 +83,7 @@ An empty `"wallpaper": ""` uses the current Windows system wallpaper.
 
 ### 4. Bar configuration
 
-Edit `config\bar.json` — use `modules-left`, `modules-center`, and `modules-right` sections (similar to Waybar on Linux).
+Edit `config\bar.json` — use `modules-left`, `modules-center`, and `modules-right` to choose bar modules (similar to Waybar on Linux). Supported module names: `activities`, `clock`, `battery`, `network`, `volume`, `system`, `spacer`, `text/<label>`. Changes are picked up automatically when the file is saved.
 
 ### 5. Dock configuration
 
@@ -109,17 +114,31 @@ To restore Explorer:
 
 1. Run `wingnome.exe` — you should see the desktop wallpaper, top bar, and dock.
 2. Check bar modules: clock, battery, network.
-3. Change `config\bar.json` (e.g. background color) and restart.
+3. Change `config\bar.json` (e.g. background color or module list) and verify the bar updates without restarting.
 4. Set a custom wallpaper in `config\shell.json` and verify it displays.
 5. Hover the bottom screen edge to show the dock (if autohide is enabled).
 
+## Troubleshooting
+
+### `wingnome.exe` fails to start (`0xc0000006` or similar)
+
+This usually means you are running an **old executable** from before the Direct2D migration, or a copy of `wingnome.exe` without its `config\` folder next to it.
+
+1. Rebuild from a clean tree:
+   ```powershell
+   Remove-Item -Recurse -Force build -ErrorAction SilentlyContinue
+   cmake -B build -G "Visual Studio 18 2026" -A x64
+   cmake --build build --config Release
+   ```
+2. Run from the build output directory (config is copied automatically):
+   ```powershell
+   .\build\Release\wingnome.exe
+   ```
+3. The current build uses **Direct2D** and only Windows system DLLs. The MSVC runtime is linked **statically** — no `sfml-*.dll` or VC++ Redistributable install is required.
+
 ## Technology choices
 
-The project uses **C++17 + Win32 API** — a solid fit for a Windows shell:
-
-- direct access to Win32/COM (wallpaper, audio, network)
-- a single native executable with no runtime dependency
-- low latency and full control over windows
+The project uses **C++17 + Win32 API + Direct2D / DirectWrite** — hardware-accelerated rendering with native Windows integration (wallpaper, audio, network, battery).
 
 ## License
 

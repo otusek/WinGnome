@@ -15,6 +15,7 @@ public:
     HWND hwnd() const { return hwnd_; }
 
     void setWallpaperPath(const std::wstring& path);
+    void setTopInset(int topInset);
     void relayout();
 
 private:

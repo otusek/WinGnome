@@ -1,5 +1,7 @@
 #include "dock_config.h"
 
+#include <algorithm>
+
 namespace wingnome {
 
 namespace {
@@ -15,6 +17,12 @@ int objInt(const JsonObject& obj, const std::wstring& key, int fallback) {
     auto it = obj.find(key);
     if (it == obj.end() || it->second.type() != JsonValue::Type::Number) return fallback;
     return static_cast<int>(it->second.asNumber());
+}
+
+float objFloat(const JsonObject& obj, const std::wstring& key, float fallback) {
+    auto it = obj.find(key);
+    if (it == obj.end() || it->second.type() != JsonValue::Type::Number) return fallback;
+    return static_cast<float>(it->second.asNumber());
 }
 
 }  // namespace
@@ -34,6 +42,14 @@ std::optional<COLORREF> DockConfig::parseColor(const std::wstring& s) {
     return RGB(r, g, b);
 }
 
+std::vector<std::wstring> DockConfig::stringList(const JsonArray& arr) {
+    std::vector<std::wstring> out;
+    for (const auto& v : arr) {
+        if (v.type() == JsonValue::Type::String) out.push_back(v.asString());
+    }
+    return out;
+}
+
 DockConfig DockConfig::load(const std::filesystem::path& path) {
     DockConfig cfg;
     const auto parsed = JsonParser::parseFile(path);
@@ -44,32 +60,27 @@ DockConfig DockConfig::load(const std::filesystem::path& path) {
     if (auto v = parsed->getNumber(L"icon_size")) cfg.iconSize = static_cast<int>(*v);
     if (auto v = parsed->getNumber(L"icon_spacing")) cfg.iconSpacing = static_cast<int>(*v);
     if (auto v = parsed->getNumber(L"padding_h")) cfg.paddingH = static_cast<int>(*v);
-    if (auto v = parsed->getNumber(L"padding_v")) cfg.paddingV = static_cast<int>(*v);
-    if (auto v = parsed->getNumber(L"margin_bottom")) cfg.marginBottom = static_cast<int>(*v);
     if (auto v = parsed->getNumber(L"corner_radius")) cfg.cornerRadius = static_cast<int>(*v);
     if (auto bg = parsed->getString(L"background")) {
         if (auto c = parseColor(*bg)) cfg.background = *c;
     }
-    if (auto v = parsed->getNumber(L"background_alpha")) cfg.backgroundAlpha = static_cast<int>(*v);
+    if (auto v = parsed->getNumber(L"background_opacity")) cfg.backgroundOpacity = static_cast<float>(*v);
+    if (auto v = parsed->getNumber(L"background_blur")) cfg.backgroundBlur = *v != 0;
+    if (auto v = parsed->getNumber(L"transparent_window")) cfg.transparentWindow = *v != 0;
+    if (auto v = parsed->getNumber(L"use_adwaita_icons")) cfg.useAdwaitaIcons = *v != 0;
     if (auto v = parsed->getNumber(L"autohide")) cfg.autohide = *v != 0;
-    if (auto v = parsed->getNumber(L"autohide_trigger_px")) cfg.autohideTriggerPx = static_cast<int>(*v);
+    if (auto v = parsed->getNumber(L"autohide_delay_ms")) cfg.autohideDelayMs = static_cast<int>(*v);
     if (auto v = parsed->getNumber(L"show_activities")) cfg.showActivities = *v != 0;
-    if (auto v = parsed->getNumber(L"show_running_apps")) cfg.showRunningApps = *v != 0;
-    if (auto ac = parsed->getString(L"activities_command")) cfg.activitiesCommand = *ac;
-
-    if (auto arr = parsed->getArray(L"pinned")) {
-        for (const auto& item : *arr) {
-            if (item.type() == JsonValue::Type::String) cfg.pinned.push_back(item.asString());
-        }
-    }
+    if (auto cmd = parsed->getString(L"activities_command")) cfg.activitiesCommand = *cmd;
+    if (auto arr = parsed->getArray(L"pinned")) cfg.pinned = stringList(*arr);
 
     if (auto perf = parsed->getObject(L"performance")) {
-        cfg.performance.vsync = objBool(*perf, L"vsync", cfg.performance.vsync);
         cfg.performance.dataTickMs = objInt(*perf, L"data_tick_ms", cfg.performance.dataTickMs);
         cfg.performance.idleSleepMs = objInt(*perf, L"idle_sleep_ms", cfg.performance.idleSleepMs);
         cfg.performance.animFps = objInt(*perf, L"anim_fps", cfg.performance.animFps);
     }
 
+    cfg.backgroundOpacity = std::clamp(cfg.backgroundOpacity, 0.f, 1.f);
     return cfg;
 }
 

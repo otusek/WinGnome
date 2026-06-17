@@ -5,19 +5,13 @@ namespace wingnome {
 void AnimChannel::update(float deltaSeconds, float durationMs) {
     if (durationMs <= 0.f) {
         current_ = target_;
+        progress_ = 1.f;
         return;
     }
-    const float step = deltaSeconds / (durationMs * 0.001f);
-    current_ = approach(current_, target_, step);
+    progress_ = std::min(1.f, progress_ + deltaSeconds / (durationMs * 0.001f));
+    current_ = start_ + (target_ - start_) * easeOutCubic(progress_);
 }
 
-void PulseAnim::update(float deltaSeconds, float speedHz) {
-    if (!enabled_) {
-        value_ = 0.f;
-        return;
-    }
-    phase_ += deltaSeconds * speedHz * 6.2831853f;
-    value_ = 0.5f + 0.5f * std::sin(phase_);
-}
+float AnimChannel::value() const { return current_; }
 
 }  // namespace wingnome

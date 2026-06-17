@@ -1,76 +1,58 @@
 #pragma once
 
-#include "bar_anim.h"
-#include "bar_config.h"
+#include "gfx/d2d_window.h"
+#include "gfx/frame_timer.h"
+#include "gfx/gfx_font.h"
+#include "gfx/types.h"
+#include "svg_icons.h"
 
-#include <SFML/Graphics.hpp>
+#include <windows.h>
 
-#include <functional>
+#include <vector>
 
 namespace wingnome {
 
 class BarPopup {
 public:
-    using Action = std::function<void()>;
-
-    bool create(int barHeight, int screenWidth, const BarConfig& config);
+    bool create();
     void destroy();
-    void toggle();
-    void close();
-    bool isVisible() const;
-    bool isAnimating() const;
-    bool processFrame(float deltaSeconds);
-    bool pollEvents();
-    void render();
+    bool isOpen() const { return open_; }
+    bool isVisible() const { return visible_; }
+    HWND hwnd() const { return window_.hwnd(); }
 
-    void setOnScreenshot(Action fn) { onScreenshot_ = std::move(fn); }
-    void setOnSettings(Action fn) { onSettings_ = std::move(fn); }
-    void setOnPower(Action fn) { onPower_ = std::move(fn); }
+    void show(const GfxRect& anchor, COLORREF background, COLORREF foreground,
+              const std::wstring& font, int fontSize);
+    void hide();
+
+    bool processFrame();
 
 private:
-    enum class Hit { None, Volume, Screenshot, Settings, Power };
+    struct Item {
+        std::wstring label;
+        std::wstring icon;
+        void (*action)();
+    };
 
-    const BarConfig* config_{nullptr};
-    sf::RenderWindow window_;
-    AnimChannel openAnim_;
     bool open_{false};
-    int barHeight_{32};
-    int screenWidth_{0};
-    sf::Vector2i mousePos_{};
-    Hit hover_{Hit::None};
-    bool draggingVolume_{false};
-    float volumeLevel_{1.f};
-    bool volumeMuted_{false};
+    bool visible_{false};
+    bool dirty_{true};
+    int hovered_{-1};
+  D2dWindow window_;
+    GfxFont font_;
+    SvgIconCache icons_;
+    FrameTimer frameTimer_;
+    GfxColor bg_{};
+    GfxColor fg_{};
+    int fontSize_{11};
+    std::vector<Item> items_;
+    std::vector<GfxRect> itemBounds_;
 
-    sf::Sprite volumeSprite_;
-    sf::Sprite screenshotSprite_;
-    sf::Sprite settingsSprite_;
-    sf::Sprite powerSprite_;
-    const sf::Texture* volumeTexture_{nullptr};
-    const sf::Texture* mutedTexture_{nullptr};
-    const sf::Texture* screenshotTexture_{nullptr};
-    const sf::Texture* settingsTexture_{nullptr};
-    const sf::Texture* powerTexture_{nullptr};
-
-    Action onScreenshot_;
-    Action onSettings_;
-    Action onPower_;
-
-    float panelWidth() const;
-    float panelHeight() const;
-    float panelX() const;
-    sf::FloatRect buttonRect(int index) const;
-    sf::FloatRect volumeSliderRect() const;
-    sf::FloatRect volumeHitRect() const;
-    Hit hitTest(const sf::Vector2i& pos) const;
-    void applyPosition();
-    void loadIcons();
-    void refreshVolume();
-    void setVolumeFromX(float x);
-    void applyVolume();
-    sf::Color panelColor(float alpha) const;
-    sf::Color hoverColor(float alpha) const;
-    void drawPanel();
+    bool loadFont(const std::wstring& family);
+    void buildItems();
+    void layoutItems();
+    int itemAt(const GfxVec2i& pos) const;
+    bool pollEvents();
+    bool render();
 };
 
 }  // namespace wingnome

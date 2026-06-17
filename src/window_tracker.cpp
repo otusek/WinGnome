@@ -1,106 +1,81 @@
-#include "platform.h"
 #include "window_tracker.h"
 
 #include <windows.h>
 
-#include <algorithm>
-#include <unordered_map>
-
 namespace wingnome {
 
-bool WindowTracker::shouldSkip(HWND hwnd) const {
-    if (!hwnd || !IsWindow(hwnd)) return true;
-    if (!IsWindowVisible(hwnd)) return true;
-    if (GetWindow(hwnd, GW_OWNER) != nullptr) return true;
+namespace {
 
-    for (HWND ex : exclude_) {
-        if (hwnd == ex) return true;
+struct EnumData {
+    WindowTracker* tracker;
+    const std::vector<HWND>* exclude;
+};
+
+BOOL CALLBACK enumWindowsProc(HWND hwnd, LPARAM param) {
+    auto* data = reinterpret_cast<EnumData*>(param);
+    WindowTracker* self = data->tracker;
+    if (!IsWindowVisible(hwnd)) return TRUE;
+
+    wchar_t title[256]{};
+    if (GetWindowTextW(hwnd, title, 256) == 0) return TRUE;
+
+    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if ((style & WS_CHILD) != 0) return TRUE;
+
+    for (HWND excluded : *data->exclude) {
+        if (hwnd == excluded) return TRUE;
     }
 
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
-    if (pid == GetCurrentProcessId()) return true;
+    if (pid == 0) return TRUE;
 
-    wchar_t className[256]{};
-    GetClassNameW(hwnd, className, 256);
-    if (wcscmp(className, L"Shell_TrayWnd") == 0) return true;
-    if (wcscmp(className, L"Shell_SecondaryTrayWnd") == 0) return true;
-    if (wcscmp(className, L"Progman") == 0) return true;
-    if (wcscmp(className, L"WorkerW") == 0) return true;
-    if (wcscmp(className, L"WinGnomeDesktop") == 0) return true;
-    if (wcscmp(className, L"WinGnome Dock") == 0) return true;
-
-    LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
-    if ((style & WS_VISIBLE) == 0) return true;
-
-    LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-    if (exStyle & WS_EX_TOOLWINDOW) return true;
-    if (exStyle & WS_EX_NOACTIVATE) return true;
-
-    if (GetWindowTextLengthW(hwnd) == 0) return true;
-
-    return false;
-}
-
-std::wstring WindowTracker::exePathForWindow(HWND hwnd) {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(hwnd, &pid);
-    if (!pid) return {};
-
-    HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!proc) return {};
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return TRUE;
 
     wchar_t path[MAX_PATH]{};
-    DWORD size = MAX_PATH;
-    std::wstring result;
-    if (QueryFullProcessImageNameW(proc, 0, path, &size)) {
-        result = path;
-    }
-    CloseHandle(proc);
-    return result;
+    DWORD pathLen = MAX_PATH;
+    std::wstring exePath;
+    if (QueryFullProcessImageNameW(process, 0, path, &pathLen)) exePath = path;
+    CloseHandle(process);
+
+    if (exePath.empty()) return TRUE;
+
+    self->addWindow(hwnd, exePath);
+    return TRUE;
 }
+
+}  // namespace
+
+void WindowTracker::setExcludeHwnds(const std::vector<HWND>& hwnds) { exclude_ = hwnds; }
 
 void WindowTracker::refresh() {
     apps_.clear();
-    std::unordered_map<std::wstring, size_t> index;
-    const HWND focused = GetForegroundWindow();
+    EnumData data{this, &exclude_};
+    EnumWindows(enumWindowsProc, reinterpret_cast<LPARAM>(&data));
 
-    struct State {
-        WindowTracker* tracker;
-        std::unordered_map<std::wstring, size_t>* index;
-        std::vector<RunningApp>* apps;
-        HWND focused;
-    } state{this, &index, &apps_, focused};
-
-    EnumWindows(
-        [](HWND hwnd, LPARAM param) -> BOOL {
-            auto* s = reinterpret_cast<State*>(param);
-            if (s->tracker->shouldSkip(hwnd)) return TRUE;
-
-            const std::wstring path = WindowTracker::exePathForWindow(hwnd);
-            if (path.empty()) return TRUE;
-
-            auto it = s->index->find(path);
-            if (it == s->index->end()) {
-                RunningApp app;
-                app.exePath = path;
-                app.windows.push_back(hwnd);
-                app.focused = hwnd == s->focused;
-                (*s->index)[path] = s->apps->size();
-                s->apps->push_back(std::move(app));
-            } else {
-                RunningApp& app = (*s->apps)[it->second];
-                app.windows.push_back(hwnd);
-                if (hwnd == s->focused) app.focused = true;
+    HWND fg = GetForegroundWindow();
+    for (auto& app : apps_) {
+        for (HWND hwnd : app.windows) {
+            if (hwnd == fg) {
+                app.focused = true;
+                break;
             }
-            return TRUE;
-        },
-        reinterpret_cast<LPARAM>(&state));
+        }
+    }
+}
 
-    std::sort(apps_.begin(), apps_.end(),
-              [](const RunningApp& a, const RunningApp& b) {
-                  return _wcsicmp(a.exePath.c_str(), b.exePath.c_str()) < 0;
-              });
+void WindowTracker::addWindow(HWND hwnd, const std::wstring& path) {
+    for (auto& app : apps_) {
+        if (_wcsicmp(app.path.c_str(), path.c_str()) == 0) {
+            app.windows.push_back(hwnd);
+            return;
+        }
+    }
+    RunningApp app;
+    app.path = path;
+    app.windows.push_back(hwnd);
+    apps_.push_back(std::move(app));
 }
 
 }  // namespace wingnome

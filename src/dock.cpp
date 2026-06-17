@@ -1,6 +1,8 @@
 #include "platform.h"
 #include "dock.h"
 
+#include "app_icons.h"
+#include "json.h"
 #include "paths.h"
 
 #include <shellapi.h>
@@ -12,56 +14,138 @@ namespace wingnome {
 
 namespace {
 
+constexpr float kSeparatorWidth = 12.f;
+
 void focusWindow(HWND hwnd) {
     if (!hwnd) return;
     HWND fg = GetForegroundWindow();
     DWORD fgThread = GetWindowThreadProcessId(fg, nullptr);
+    DWORD hwndThread = GetWindowThreadProcessId(hwnd, nullptr);
     DWORD curThread = GetCurrentThreadId();
     if (fgThread != curThread) AttachThreadInput(curThread, fgThread, TRUE);
+    if (hwndThread != curThread) AttachThreadInput(curThread, hwndThread, TRUE);
     if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+    AllowSetForegroundWindow(ASFW_ANY);
     SetForegroundWindow(hwnd);
     BringWindowToTop(hwnd);
+    if (hwndThread != curThread) AttachThreadInput(curThread, hwndThread, FALSE);
     if (fgThread != curThread) AttachThreadInput(curThread, fgThread, FALSE);
 }
 
+GfxColor dockBgColor(const DockConfig& cfg, float alphaMul) {
+    GfxColor c = gfxFromColorref(cfg.background);
+    c.a = static_cast<uint8_t>(std::clamp(cfg.backgroundOpacity * alphaMul, 0.f, 1.f) * 255.f);
+    return c;
+}
+
 }  // namespace
+
+void Dock::markDirty() { dirty_ = true; }
+
+int Dock::screenWidth() const { return GetSystemMetrics(SM_CXSCREEN); }
+
+int Dock::screenHeight() const { return GetSystemMetrics(SM_CYSCREEN); }
+
+bool Dock::usesLayeredWindow() const {
+    return config_.transparentWindow && !config_.backgroundBlur;
+}
+
+bool Dock::recreateWindow() {
+    if (!open_) return false;
+
+    const GfxRect rect = dockScreenRect();
+    const int w = std::max(static_cast<int>(rect.width), 64);
+    const int h = static_cast<int>(rect.height);
+    const int x = static_cast<int>(rect.left);
+    const int y = static_cast<int>(rect.top);
+
+    window_.destroy();
+    icons_.clear();
+
+    windowLayered_ = usesLayeredWindow();
+    windowBlur_ = config_.backgroundBlur;
+    if (!window_.create(L"WinGnome Dock", x, y, w, h, windowBlur_, windowLayered_)) {
+        open_ = false;
+        return false;
+    }
+
+    applyVisualStyle();
+    applyTopmost();
+    return true;
+}
+
+void Dock::applyVisualStyle() {
+    if (!window_.isOpen()) return;
+
+    window_.enableAcrylic(windowBlur_ && !windowLayered_);
+
+    const GfxSize sz = window_.clientSize();
+    const int w = static_cast<int>(sz.width);
+    const int h = static_cast<int>(sz.height);
+    if (windowBlur_ && !windowLayered_) {
+        window_.setRoundedRegion(w, h, static_cast<float>(config_.cornerRadius));
+    } else if (!windowLayered_) {
+        window_.clearWindowRegion();
+    }
+    markDirty();
+}
+
+bool Dock::openWindow() {
+    if (open_ || !config_.enabled) return open_;
+
+    tracker_.refresh();
+    rebuildItems();
+
+    const int width = static_cast<int>(contentWidth());
+    const int height = config_.height;
+    const int x = (screenWidth() - width) / 2;
+    const int y = screenHeight() - height;
+
+    windowLayered_ = usesLayeredWindow();
+    windowBlur_ = config_.backgroundBlur;
+    if (!window_.create(L"WinGnome Dock", x, y, std::max(width, 64), height, windowBlur_,
+                        windowLayered_)) {
+        return false;
+    }
+
+    applyVisualStyle();
+    icons_.setThemeEnabled(config_.useAdwaitaIcons);
+    applyTopmost();
+
+    visibility_.snap(config_.autohide ? 0.f : 1.f);
+    if (!config_.autohide) visibility_.setTarget(1.f);
+
+    open_ = true;
+    applyPosition();
+    dirty_ = true;
+    return true;
+}
+
+void Dock::closeWindow() {
+    if (!open_) return;
+    icons_.clear();
+    window_.destroy();
+    open_ = false;
+}
 
 bool Dock::create() {
     configPath_ = findConfigFile(L"dock.json");
     reloadConfig();
     if (!config_.enabled) return true;
+    if (!openWindow()) return false;
 
-    tracker_.refresh();
-    rebuildItems();
-    const int width = static_cast<int>(contentWidth());
-
-    window_.create(sf::VideoMode(std::max(width, 64), config_.height), "WinGnome Dock", sf::Style::None);
-    if (!window_.isOpen()) return false;
-
-    window_.setVerticalSyncEnabled(config_.performance.vsync);
-    window_.setActive(false);
-    applyTopmost();
-    applyPosition();
-
-    visibility_.snap(config_.autohide ? 0.f : 1.f);
-
-    frameClock_.restart();
-    animClock_.restart();
-    dataClock_.restart();
-    dirty_ = true;
-    open_ = true;
+    frameTimer_.restart();
+    animTimer_.restart();
+    dataTimer_.restart();
+    autohideTimer_.restart();
     return true;
 }
 
 void Dock::destroy() {
-    if (window_.isOpen()) window_.close();
-    icons_.clear();
-    open_ = false;
+    closeWindow();
 }
 
-HWND Dock::hwnd() const {
-    return window_.isOpen() ? reinterpret_cast<HWND>(window_.getSystemHandle()) : nullptr;
-}
+HWND Dock::hwnd() const { return window_.hwnd(); }
 
 void Dock::setExcludeHwnds(const std::vector<HWND>& hwnds) {
     std::vector<HWND> all = hwnds;
@@ -70,180 +154,273 @@ void Dock::setExcludeHwnds(const std::vector<HWND>& hwnds) {
 }
 
 void Dock::reloadConfig() {
+    const bool prevLayered = windowLayered_;
+    const bool prevBlur = windowBlur_;
+    const bool prevAutohide = config_.autohide;
+    const bool prevTheme = config_.useAdwaitaIcons;
+
+    configPath_ = findConfigFile(L"dock.json");
+    const auto parsed = JsonParser::parseFile(configPath_);
+    if (!parsed || parsed->type() != JsonValue::Type::Object) {
+        configMarkReloaded(configWatch_, configPath_);
+        return;
+    }
+
     config_ = DockConfig::load(configPath_);
+
+    if (!config_.enabled) {
+        closeWindow();
+        configMarkReloaded(configWatch_, configPath_);
+        return;
+    }
+
+    icons_.setThemeEnabled(config_.useAdwaitaIcons);
+    if (prevTheme != config_.useAdwaitaIcons) icons_.clear();
+
+    if (!open_) {
+        openWindow();
+        configMarkReloaded(configWatch_, configPath_);
+        return;
+    }
+
+    const bool layered = usesLayeredWindow();
+    const bool blur = config_.backgroundBlur;
+
+    if (layered != prevLayered || blur != prevBlur) {
+        recreateWindow();
+    } else {
+        applyVisualStyle();
+    }
+
+    if (prevAutohide != config_.autohide && !config_.autohide) {
+        visibility_.setTarget(1.f);
+    }
+
+    tracker_.refresh();
+    rebuildItems();
+    configMarkReloaded(configWatch_, configPath_);
     dirty_ = true;
 }
 
+void Dock::checkConfigChanged() {
+    if (!configNeedsReload(configWatch_, L"dock.json")) return;
+    reloadConfig();
+}
+
 float Dock::contentWidth() const {
-    int count = 0;
+    if (!items_.empty()) {
+        const auto& last = items_.back();
+        return last.bounds.left + last.bounds.width + static_cast<float>(config_.paddingH);
+    }
+
+    int count = static_cast<int>(config_.pinned.size());
     if (config_.showActivities) ++count;
-    int apps = static_cast<int>(items_.size());
-    if (apps == 0) apps = static_cast<int>(config_.pinned.size());
-    count += apps;
-    if (count == 0) count = config_.showActivities ? 1 : 0;
+    if (count == 0) count = 1;
     const float icons = static_cast<float>(count);
-    return config_.paddingH * 2.f +
-           icons * static_cast<float>(config_.iconSize) +
+    return config_.paddingH * 2.f + icons * static_cast<float>(config_.iconSize) +
            std::max(0.f, icons - 1.f) * static_cast<float>(config_.iconSpacing);
 }
 
 void Dock::rebuildItems() {
     items_.clear();
 
-    std::vector<std::wstring> pinnedResolved;
-    pinnedResolved.reserve(config_.pinned.size());
-    for (const auto& p : config_.pinned) {
-        const std::wstring resolved = resolveAppPath(p);
-        if (!resolved.empty()) pinnedResolved.push_back(resolved);
+    if (config_.showActivities) {
+        DockItem activities;
+        activities.kind = ItemKind::Activities;
+        activities.path = L"activities";
+        items_.push_back(std::move(activities));
     }
 
-    auto addItem = [&](const std::wstring& path, const RunningApp* running) {
-        for (auto& item : items_) {
-            if (_wcsicmp(item.path.c_str(), path.c_str()) == 0) {
-                if (running) {
-                    item.running = true;
-                    item.focused = running->focused;
-                    item.windows = running->windows;
-                }
-                return;
-            }
-        }
+    struct PinnedEntry {
+        std::wstring launchPath;
+        std::wstring exePath;
+    };
+    std::vector<PinnedEntry> pinned;
+    pinned.reserve(config_.pinned.size());
+    for (const auto& p : config_.pinned) {
+        const std::wstring exePath = resolveAppPath(p);
+        if (!exePath.empty()) pinned.push_back({p, exePath});
+    }
+
+    for (const auto& entry : pinned) {
         DockItem item;
         item.kind = ItemKind::App;
-        item.path = path;
-        if (running) {
-            item.running = true;
-            item.focused = running->focused;
-            item.windows = running->windows;
-        }
+        item.path = entry.exePath;
+        item.launchPath = entry.launchPath;
+        item.pinned = true;
         items_.push_back(std::move(item));
+    }
+
+    auto markPinnedRunning = [&](const RunningApp& app) {
+        for (auto& item : items_) {
+            if (item.kind != ItemKind::App || !item.pinned) continue;
+            if (_wcsicmp(item.path.c_str(), app.path.c_str()) != 0) continue;
+            item.running = true;
+            item.focused = app.focused;
+            item.windows = app.windows;
+            return true;
+        }
+        return false;
     };
 
-    for (const auto& path : pinnedResolved) addItem(path, nullptr);
-
-    if (config_.showRunningApps) {
-        for (const auto& app : tracker_.apps()) addItem(app.exePath, &app);
+    std::vector<RunningApp> unpinnedRunning;
+    unpinnedRunning.reserve(tracker_.apps().size());
+    for (const auto& app : tracker_.apps()) {
+        if (markPinnedRunning(app)) continue;
+        unpinnedRunning.push_back(app);
     }
 
-    const int newW = static_cast<int>(contentWidth());
-    if (window_.isOpen() && window_.getSize().x != static_cast<unsigned>(newW)) {
-        window_.setSize(sf::Vector2u(newW, static_cast<unsigned>(config_.height)));
-        applyTopmost();
+    if (!pinned.empty() && !unpinnedRunning.empty()) {
+        DockItem separator;
+        separator.kind = ItemKind::Separator;
+        items_.push_back(std::move(separator));
     }
-    dirty_ = true;
+
+    for (const auto& app : unpinnedRunning) {
+        DockItem item;
+        item.kind = ItemKind::App;
+        item.path = app.path;
+        item.launchPath = app.path;
+        item.running = true;
+        item.focused = app.focused;
+        item.windows = app.windows;
+        items_.push_back(std::move(item));
+    }
+
+    layoutItemBounds();
+    if (open_) applyPosition();
 }
 
-void Dock::applyTopmost() {
-    HWND native = hwnd();
-    if (!native) return;
-    LONG_PTR ex = GetWindowLongPtr(native, GWL_EXSTYLE);
-    SetWindowLongPtr(native, GWL_EXSTYLE, ex | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED);
-    SetLayeredWindowAttributes(native, RGB(1, 0, 1), 0, LWA_COLORKEY);
-    SetWindowPos(native, HWND_TOPMOST, window_.getPosition().x, window_.getPosition().y,
-                 static_cast<int>(window_.getSize().x), config_.height, SWP_SHOWWINDOW);
+void Dock::layoutItemBounds() {
+    const float iconSize = static_cast<float>(config_.iconSize);
+    const float spacing = static_cast<float>(config_.iconSpacing);
+    const float pad = static_cast<float>(config_.paddingH);
+    const float h = static_cast<float>(config_.height);
+    float x = pad;
+
+    for (auto& item : items_) {
+        const float slotW = item.kind == ItemKind::Separator ? kSeparatorWidth : iconSize;
+        item.bounds = {x, 0.f, slotW, h};
+        x += slotW + spacing;
+    }
+}
+
+GfxRect Dock::dockScreenRect() const {
+    const float w = contentWidth();
+    const float h = static_cast<float>(config_.height);
+    const float x = (static_cast<float>(screenWidth()) - w) * 0.5f;
+    const float vis = visibility_.value();
+    const float y =
+        static_cast<float>(screenHeight()) - h + (1.f - vis) * (h + 12.f);
+    return {x, y, w, h};
 }
 
 void Dock::applyPosition() {
     if (!window_.isOpen()) return;
-    const int screenW = GetSystemMetrics(SM_CXSCREEN);
-    const int screenH = GetSystemMetrics(SM_CYSCREEN);
-    const int width = static_cast<int>(window_.getSize().x);
-    const int x = (screenW - width) / 2;
-    const float vis = config_.autohide ? visibility_.value() : 1.f;
-    const int hiddenOffset = config_.height + config_.marginBottom;
-    const int y = screenH - config_.marginBottom - config_.height +
-                  static_cast<int>((1.f - vis) * static_cast<float>(hiddenOffset));
-    window_.setPosition(sf::Vector2i(x, y));
-    HWND native = hwnd();
-    if (native) {
-        SetWindowPos(native, HWND_TOPMOST, x, y, width, config_.height, SWP_SHOWWINDOW);
+    const GfxRect rect = dockScreenRect();
+    const int w = static_cast<int>(rect.width);
+    const int h = static_cast<int>(rect.height);
+    window_.resize(w, h);
+    window_.setTopmost(static_cast<int>(rect.left), static_cast<int>(rect.top), w, h);
+    if (windowBlur_ && !windowLayered_) {
+        window_.setRoundedRegion(w, h, static_cast<float>(config_.cornerRadius));
     }
 }
 
-sf::FloatRect Dock::dockScreenRect() const {
-    const sf::Vector2i pos = window_.getPosition();
-    return {static_cast<float>(pos.x), static_cast<float>(pos.y),
-            static_cast<float>(window_.getSize().x), static_cast<float>(config_.height)};
+void Dock::applyTopmost() {
+    if (!window_.isOpen()) return;
+    const GfxRect rect = dockScreenRect();
+    window_.setTopmost(static_cast<int>(rect.left), static_cast<int>(rect.top),
+                       static_cast<int>(rect.width), static_cast<int>(rect.height));
 }
 
 void Dock::updateAutohide() {
     if (!config_.autohide) {
-        visibility_.setTarget(1.f);
-        visibility_.update(deltaTime_, 180.f);
+        if (visibility_.value() < 1.f) {
+            visibility_.setTarget(1.f);
+            markDirty();
+        }
         return;
     }
 
     POINT cursor{};
     GetCursorPos(&cursor);
-    const int screenH = GetSystemMetrics(SM_CYSCREEN);
-    const sf::FloatRect dock = dockScreenRect();
-    const bool overDock = dock.contains(static_cast<float>(cursor.x), static_cast<float>(cursor.y));
-    const bool nearBottom = cursor.y >= screenH - config_.autohideTriggerPx;
-    visibility_.setTarget(overDock || nearBottom ? 1.f : 0.f);
-    visibility_.update(deltaTime_, 220.f);
-    applyPosition();
+    const GfxRect dock = dockScreenRect();
+    const float margin = 8.f;
+    const bool inDock =
+        static_cast<float>(cursor.x) >= dock.left - margin &&
+        static_cast<float>(cursor.x) <= dock.left + dock.width + margin &&
+        static_cast<float>(cursor.y) >= dock.top - margin &&
+        static_cast<float>(cursor.y) <= static_cast<float>(screenHeight()) + margin;
+
+    pointerNearDock_ = inDock;
+
+    if (inDock) {
+        autohideTimer_.restart();
+        if (visibility_.value() < 1.f) {
+            visibility_.setTarget(1.f);
+            markDirty();
+        }
+        return;
+    }
+
+    if (autohideTimer_.elapsedMilliseconds() >= config_.autohideDelayMs && visibility_.value() > 0.f) {
+        visibility_.setTarget(0.f);
+        markDirty();
+    }
 }
 
 void Dock::updateHover() {
     POINT cursor{};
     GetCursorPos(&cursor);
-    const sf::Vector2i winPos = window_.getPosition();
-    const sf::Vector2i local{cursor.x - winPos.x, cursor.y - winPos.y};
-    hoveredIndex_ = itemAt(local);
+    const GfxRect dock = dockScreenRect();
+    const GfxVec2i pos{
+        cursor.x - static_cast<int>(dock.left),
+        cursor.y - static_cast<int>(dock.top),
+    };
 
-    const float hoverSpeed = 12.f;
-    for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        const float target = (i == hoveredIndex_) ? 1.f : 0.f;
-        items_[static_cast<size_t>(i)].hover = approach(items_[static_cast<size_t>(i)].hover, target,
-                                                         hoverSpeed * deltaTime_);
-        if (std::abs(items_[static_cast<size_t>(i)].hover - target) > 0.001f) dirty_ = true;
-    }
-    if (config_.showActivities) {
-        const int actIndex = 0;
-        const bool hoverAct = hoveredIndex_ == actIndex;
-        (void)hoverAct;
-    }
+    const int prev = hoveredIndex_;
+    hoveredIndex_ = itemAt(pos);
+    if (prev != hoveredIndex_) markDirty();
 }
 
-int Dock::itemAt(const sf::Vector2i& pos) const {
-    float x = static_cast<float>(config_.paddingH);
-    const float cy = static_cast<float>(config_.height) * 0.5f;
-    const float hit = static_cast<float>(config_.iconSize) * 0.55f;
-
-    if (config_.showActivities) {
-        const float cx = x + static_cast<float>(config_.iconSize) * 0.5f;
-        if (std::abs(pos.x - cx) <= hit && std::abs(pos.y - cy) <= hit) return 0;
-        x += static_cast<float>(config_.iconSize + config_.iconSpacing);
-    }
-
+int Dock::itemAt(const GfxVec2i& pos) const {
     for (int i = 0; i < static_cast<int>(items_.size()); ++i) {
-        const int visualIndex = i + (config_.showActivities ? 1 : 0);
-        const float cx = x + static_cast<float>(config_.iconSize) * 0.5f;
-        if (std::abs(pos.x - cx) <= hit && std::abs(pos.y - cy) <= hit) return visualIndex;
-        x += static_cast<float>(config_.iconSize + config_.iconSpacing);
+        const DockItem& item = items_[static_cast<size_t>(i)];
+        if (item.kind == ItemKind::Separator) continue;
+        if (item.bounds.contains(static_cast<float>(pos.x), static_cast<float>(pos.y))) {
+            return i;
+        }
     }
     return -1;
 }
 
-void Dock::launchApp(const std::wstring& path) {
-    const std::wstring resolved = resolveAppPath(path);
-    if (resolved.empty()) return;
+void Dock::launchApp(const std::wstring& launchPath) {
+    if (launchPath.empty()) return;
+
+    const HINSTANCE result =
+        ShellExecuteW(nullptr, L"open", launchPath.c_str(), nullptr, nullptr, SW_SHOW);
+    if (reinterpret_cast<intptr_t>(result) > 32) return;
+
+    const std::wstring resolved = resolveAppPath(launchPath);
+    if (resolved.empty() || _wcsicmp(resolved.c_str(), launchPath.c_str()) == 0) return;
+
     ShellExecuteW(nullptr, L"open", resolved.c_str(), nullptr, nullptr, SW_SHOW);
 }
 
 void Dock::focusApp(const DockItem& item) {
     HWND target = nullptr;
     for (HWND hwnd : item.windows) {
-        if (IsWindow(hwnd) && IsWindowVisible(hwnd)) {
+        if (!IsWindow(hwnd)) continue;
+        if (hwnd == GetForegroundWindow()) return;
+        if (!target) target = hwnd;
+        if (IsWindowVisible(hwnd)) {
             target = hwnd;
-            if (hwnd == GetForegroundWindow()) return;
+            break;
         }
     }
-    if (target) {
-        focusWindow(target);
-        return;
-    }
-    launchApp(item.path);
+    if (!target) return;
+    focusWindow(target);
 }
 
 void Dock::openActivities() {
@@ -259,175 +436,185 @@ void Dock::openActivities() {
         if (pi.hThread) CloseHandle(pi.hThread);
         return;
     }
-    keybd_event(VK_LWIN, 0, 0, 0);
-    keybd_event(VK_TAB, 0, 0, 0);
-    keybd_event(VK_TAB, 0, KEYEVENTF_KEYUP, 0);
-    keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0);
+
+    INPUT inputs[4]{};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_LWIN;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = VK_TAB;
+    inputs[2].type = INPUT_KEYBOARD;
+    inputs[2].ki.wVk = VK_TAB;
+    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+    inputs[3].type = INPUT_KEYBOARD;
+    inputs[3].ki.wVk = VK_LWIN;
+    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(4, inputs, sizeof(INPUT));
 }
 
-void Dock::drawRoundedBackground(sf::RenderTarget& target, const sf::FloatRect& rect) const {
-    const float r = static_cast<float>(config_.cornerRadius);
-    const sf::Color bg = toSfColor(config_.background,
-                                   static_cast<sf::Uint8>(config_.backgroundAlpha));
-
-    auto drawBar = [&](float x, float y, float w, float h) {
-        sf::RectangleShape bar({w, h});
-        bar.setPosition(x, y);
-        bar.setFillColor(bg);
-        target.draw(bar);
-    };
-
-    drawBar(rect.left + r, rect.top, rect.width - 2.f * r, rect.height);
-    drawBar(rect.left, rect.top + r, r, rect.height - 2.f * r);
-    drawBar(rect.left + rect.width - r, rect.top + r, r, rect.height - 2.f * r);
-
-    const sf::CircleShape corner(r);
-    const_cast<sf::CircleShape&>(corner).setFillColor(bg);
-    auto drawCorner = [&](float x, float y) {
-        sf::CircleShape c(r);
-        c.setFillColor(bg);
-        c.setPosition(x, y);
-        target.draw(c);
-    };
-    drawCorner(rect.left, rect.top);
-    drawCorner(rect.left + rect.width - 2.f * r, rect.top);
-    drawCorner(rect.left, rect.top + rect.height - 2.f * r);
-    drawCorner(rect.left + rect.width - 2.f * r, rect.top + rect.height - 2.f * r);
+void Dock::drawBackground(float alpha) {
+    const GfxSize sz = window_.clientSize();
+    const GfxRect bg{0.f, 0.f, sz.width, sz.height};
+    window_.fillRoundedRect(bg, static_cast<float>(config_.cornerRadius), dockBgColor(config_, alpha));
 }
 
-void Dock::drawActivitiesIcon(sf::RenderTarget& target, float cx, float cy, float scale,
-                              const sf::Color& color) const {
+void Dock::drawActivitiesIcon(float cx, float cy, float scale, GfxColor color) {
     const float dot = 3.f * scale;
     const float gap = 5.f * scale;
-    const sf::Color fg = color;
     for (int row = 0; row < 3; ++row) {
         for (int col = 0; col < 3; ++col) {
-            sf::CircleShape dotShape(dot);
-            dotShape.setFillColor(fg);
-            dotShape.setOrigin(dot, dot);
             const float ox = (static_cast<float>(col) - 1.f) * (dot * 2.f + gap);
             const float oy = (static_cast<float>(row) - 1.f) * (dot * 2.f + gap);
-            dotShape.setPosition(cx + ox, cy + oy);
-            target.draw(dotShape);
+            const GfxRect r{cx + ox - dot, cy + oy - dot, dot * 2.f, dot * 2.f};
+            window_.fillEllipse(r, color);
         }
     }
 }
 
-void Dock::drawIndicator(sf::RenderTarget& target, float cx, float bottom, bool running,
-                         bool focused) const {
+void Dock::drawIconShadow(float cx, float iconBottom, float iconSize, float alpha) {
+    const float shadowW = iconSize * 0.72f;
+    const float shadowH = iconSize * 0.16f;
+    GfxColor shadow{0, 0, 0, static_cast<uint8_t>(std::clamp(110.f * alpha, 0.f, 255.f))};
+    const GfxRect r{cx - shadowW * 0.5f, iconBottom - shadowH * 0.55f, shadowW, shadowH};
+    window_.fillEllipse(r, shadow);
+}
+
+void Dock::drawIndicator(float cx, float bottom, bool running, bool focused, float alpha) {
     if (!running) return;
     const float w = focused ? 18.f : 5.f;
     const float h = focused ? 3.f : 5.f;
-    sf::RectangleShape pill({w, h});
-    pill.setFillColor(focused ? sf::Color::White : sf::Color(255, 255, 255, 170));
-    pill.setOrigin(w * 0.5f, h);
-    pill.setPosition(cx, bottom - 4.f);
-    target.draw(pill);
+    GfxColor color = focused ? GfxColor{255, 255, 255, 255} : GfxColor{255, 255, 255, 170};
+    color.a = static_cast<uint8_t>(color.a * alpha);
+    const GfxRect pill{cx - w * 0.5f, bottom - h - 3.f, w, h};
+    window_.fillRoundedRect(pill, h * 0.5f, color);
+}
+
+void Dock::drawSeparator(const GfxRect& bounds, float alpha) {
+    const float lineH = bounds.height * 0.52f;
+    const float lineY = bounds.top + (bounds.height - lineH) * 0.5f;
+    const float lineX = bounds.left + bounds.width * 0.5f - 0.5f;
+    GfxColor color{255, 255, 255, static_cast<uint8_t>(std::clamp(72.f * alpha, 0.f, 255.f))};
+    window_.fillRoundedRect({lineX, lineY, 1.f, lineH}, 0.5f, color);
+}
+
+bool Dock::anyAnimating() const {
+    return !visibility_.settled() || hoveredIndex_ >= 0;
 }
 
 bool Dock::pollEvents() {
-    bool activity = false;
-    sf::Event event{};
-    while (window_.pollEvent(event)) {
-        activity = true;
-        dirty_ = true;
-        if (event.type == sf::Event::Closed) {
-            open_ = false;
-            continue;
-        }
-        if (event.type == sf::Event::MouseButtonPressed &&
-            event.mouseButton.button == sf::Mouse::Left) {
-            const int index = itemAt({event.mouseButton.x, event.mouseButton.y});
-            if (index < 0) continue;
-            if (config_.showActivities && index == 0) {
+    const bool activity = window_.pollEvents();
+
+    if (window_.mouseClicked()) {
+        const GfxVec2i pos = window_.mousePos();
+        const int idx = itemAt(pos);
+        if (idx >= 0) {
+            const DockItem& item = items_[static_cast<size_t>(idx)];
+            if (item.kind == ItemKind::Activities) {
                 openActivities();
-                continue;
-            }
-            const int itemIndex = index - (config_.showActivities ? 1 : 0);
-            if (itemIndex >= 0 && itemIndex < static_cast<int>(items_.size())) {
-                focusApp(items_[static_cast<size_t>(itemIndex)]);
+            } else if (item.running) {
+                focusApp(item);
+            } else {
+                const std::wstring& launch =
+                    !item.launchPath.empty() ? item.launchPath : item.path;
+                launchApp(launch);
             }
         }
+        window_.clearMouseClicked();
+        markDirty();
     }
+
     return activity;
 }
 
 bool Dock::render() {
-    window_.clear(sf::Color(1, 0, 1));
-    const sf::FloatRect bgRect{0.f, 0.f, static_cast<float>(window_.getSize().x),
-                               static_cast<float>(config_.height)};
-    drawRoundedBackground(window_, bgRect);
+    if (!window_.isOpen()) return false;
 
-    float x = static_cast<float>(config_.paddingH);
-    const float cy = static_cast<float>(config_.height) * 0.5f;
-    const float indicatorY = static_cast<float>(config_.height) - static_cast<float>(config_.paddingV);
+    ID2D1RenderTarget* rt = window_.renderTarget();
+    if (!rt) return false;
 
-    if (config_.showActivities) {
-        const float cx = x + static_cast<float>(config_.iconSize) * 0.5f;
-        const float scale = hoveredIndex_ == 0 ? 1.12f : 1.f;
-        drawActivitiesIcon(window_, cx, cy, scale, sf::Color::White);
-        x += static_cast<float>(config_.iconSize + config_.iconSpacing);
+    const float vis = visibility_.value();
+    if (vis <= 0.01f) {
+        window_.beginDraw({0, 0, 0, 0});
+        window_.endDraw();
+        return true;
     }
 
-    for (const auto& item : items_) {
-        const float hoverScale = 1.f + item.hover * 0.15f;
-        const float drawSize = static_cast<float>(config_.iconSize) * hoverScale;
-        const float cx = x + static_cast<float>(config_.iconSize) * 0.5f;
+    window_.beginDraw({0, 0, 0, 0});
+    drawBackground(vis);
 
-        if (sf::Texture* tex = icons_.get(item.path, config_.iconSize)) {
-            sf::Sprite sprite(*tex);
-            const sf::FloatRect bounds = sprite.getLocalBounds();
-            const float scale = drawSize / std::max(bounds.width, bounds.height);
-            sprite.setScale(scale, scale);
-            sprite.setOrigin(bounds.width * 0.5f, bounds.height * 0.5f);
-            sprite.setPosition(cx, cy);
-            window_.draw(sprite);
-        } else {
-            sf::CircleShape fallback(drawSize * 0.35f);
-            fallback.setFillColor(sf::Color(90, 85, 105));
-            fallback.setOrigin(fallback.getRadius(), fallback.getRadius());
-            fallback.setPosition(cx, cy);
-            window_.draw(fallback);
+    const float iconSize = static_cast<float>(config_.iconSize);
+    const float h = static_cast<float>(config_.height);
+    const float cy = h * 0.5f;
+
+    for (size_t i = 0; i < items_.size(); ++i) {
+        const DockItem& item = items_[i];
+
+        if (item.kind == ItemKind::Separator) {
+            drawSeparator(item.bounds, vis);
+            continue;
         }
 
-        drawIndicator(window_, cx, indicatorY, item.running, item.focused);
-        x += static_cast<float>(config_.iconSize + config_.iconSpacing);
+        const float iconX = item.bounds.left + item.bounds.width * 0.5f;
+        const bool hovered = static_cast<int>(i) == hoveredIndex_;
+        const float hoverScale = hovered ? 1.08f : 1.f;
+        const float drawSize = iconSize * hoverScale;
+        const float drawX = iconX - drawSize * 0.5f;
+        const float drawY = cy - drawSize * 0.5f;
+        const float iconBottom = drawY + drawSize;
+
+        drawIconShadow(iconX, iconBottom + 2.f, drawSize, vis);
+
+        if (item.kind == ItemKind::Activities) {
+            drawActivitiesIcon(iconX, cy, hoverScale, GfxColor{255, 255, 255, 255});
+        } else if (ID2D1Bitmap* bmp = icons_.get(rt, item.path, config_.iconSize)) {
+            window_.drawBitmap(bmp, {drawX, drawY, drawSize, drawSize}, vis);
+        }
+
+        drawIndicator(iconX, h, item.running, item.focused, vis);
     }
 
-    window_.display();
+    window_.endDraw();
     return true;
 }
 
 bool Dock::processFrame() {
+    checkConfigChanged();
+
     if (!config_.enabled) return false;
     if (!open_ || !window_.isOpen()) {
         open_ = false;
         return false;
     }
 
-    deltaTime_ = animClock_.restart().asSeconds();
     const bool hadInput = pollEvents();
+    updateHover();
+    updateAutohide();
 
-    if (dataClock_.getElapsedTime().asMilliseconds() >= config_.performance.dataTickMs) {
+    if (dataTimer_.elapsedMilliseconds() >= config_.performance.dataTickMs) {
         tracker_.refresh();
         rebuildItems();
-        dataClock_.restart();
+        dataTimer_.restart();
+        markDirty();
     }
 
-    updateAutohide();
-    updateHover();
+    deltaTime_ = static_cast<float>(animTimer_.elapsedSeconds());
+    animTimer_.restart();
 
-    const bool animating = config_.autohide && !visibility_.settled();
+    if (!visibility_.settled()) {
+        visibility_.update(deltaTime_, 280.f);
+        applyPosition();
+        markDirty();
+    }
+
+    const bool animating = anyAnimating();
     if (!dirty_ && !animating && !hadInput) return false;
 
-    const int animFps = std::max(1, config_.performance.animFps);
-    const float minFrame = 1.f / static_cast<float>(animFps);
-    if (animating && frameClock_.getElapsedTime().asSeconds() < minFrame) return true;
+    const int animFps = std::max(60, std::max(1, config_.performance.animFps));
+    if (animating && frameTimer_.elapsedSeconds() < 1.f / static_cast<float>(animFps)) return true;
 
-    frameClock_.restart();
+    frameTimer_.restart();
     render();
-    dirty_ = animating || hadInput;
-    return dirty_ || hadInput || animating;
+    dirty_ = animating || !visibility_.settled();
+    return dirty_ || hadInput;
 }
 
 }  // namespace wingnome

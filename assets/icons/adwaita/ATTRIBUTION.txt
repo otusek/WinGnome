@@ -1,0 +1,5 @@
+Adwaita symbolic icons from GNOME/adwaita-icon-theme (GPL-2.0-or-later).
+https://github.com/GNOME/adwaita-icon-theme
+
+These are symbolic (monochrome) icons tinted to match the dock foreground.
+When no themed icon exists, the dock falls back to the Windows shell icon.

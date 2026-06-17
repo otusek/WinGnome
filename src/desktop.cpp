@@ -46,6 +46,12 @@ void Desktop::setWallpaperPath(const std::wstring& path) {
     if (hwnd_) InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
+void Desktop::setTopInset(int topInset) {
+    if (topInset_ == topInset) return;
+    topInset_ = topInset;
+    relayout();
+}
+
 void Desktop::relayout() {
     if (!hwnd_) return;
     const int screenW = GetSystemMetrics(SM_CXSCREEN);

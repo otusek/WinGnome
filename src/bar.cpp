@@ -1,102 +1,304 @@
 #include "platform.h"
 #include "bar.h"
 
+#include "battery_status.h"
+#include "json.h"
+#include "network_status.h"
 #include "paths.h"
-
-#include <shellapi.h>
-
-#include <windows.h>
-
-#include <algorithm>
-#include <filesystem>
+#include "shell_actions.h"
 
 namespace wingnome {
 
 namespace {
 
-std::filesystem::path resolveFontFile(const std::wstring& family) {
-    static const std::pair<const wchar_t*, const wchar_t*> kMap[] = {
-        {L"Segoe UI", L"segoeui.ttf"},
-        {L"Segoe UI Semibold", L"seguisb.ttf"},
-        {L"Consolas", L"consola.ttf"},
-        {L"Arial", L"arial.ttf"},
-    };
-    for (const auto& [name, file] : kMap) {
-        if (family == name) return std::filesystem::path(L"C:\\Windows\\Fonts") / file;
-    }
-    return std::filesystem::path(L"C:\\Windows\\Fonts\\segoeui.ttf");
+int primaryScreenWidth() { return GetSystemMetrics(SM_CXSCREEN); }
+
+constexpr float kTextPadH = 12.f;
+constexpr float kIconPadH = 8.f;
+constexpr int kIconSize = 16;
+
+GfxSize measureText(const ModuleContext& ctx, const std::wstring& text, float padH = kTextPadH) {
+    if (!ctx.window || !ctx.font || text.empty()) return {padH * 2.f, static_cast<float>(ctx.fontSize)};
+    const GfxSize sz = ctx.window->measureText(*ctx.font, static_cast<float>(ctx.fontSize), text);
+    return {sz.width + padH * 2.f, static_cast<float>(ctx.barHeight)};
 }
 
-void sendWinShiftS() {
-    INPUT inputs[6]{};
-    inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = VK_LWIN;
-    inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = VK_SHIFT;
-    inputs[2].type = INPUT_KEYBOARD;
-    inputs[2].ki.wVk = 'S';
-    inputs[3].type = INPUT_KEYBOARD;
-    inputs[3].ki.wVk = 'S';
-    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[4].type = INPUT_KEYBOARD;
-    inputs[4].ki.wVk = VK_SHIFT;
-    inputs[4].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[5].type = INPUT_KEYBOARD;
-    inputs[5].ki.wVk = VK_LWIN;
-    inputs[5].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(6, inputs, sizeof(INPUT));
+void drawText(const ModulePaintInfo& info, const std::wstring& text, float padH = kTextPadH) {
+    if (!info.ctx.font || text.empty()) return;
+    const float size = static_cast<float>(info.ctx.fontSize);
+    const GfxSize sz = info.window.measureText(*info.ctx.font, size, text);
+    const float x = info.bounds.left + padH;
+    const float y = info.bounds.top + (info.bounds.height - sz.height) * 0.5f;
+    GfxColor fg = info.fg;
+    fg.a = static_cast<uint8_t>(fg.a * info.reveal);
+    info.window.drawText(*info.ctx.font, size, text, x, y, fg);
 }
+
+GfxSize measureIcon(const ModuleContext& ctx, float extraTextW = 0.f) {
+    return {kIconPadH * 2.f + kIconSize + extraTextW, static_cast<float>(ctx.barHeight)};
+}
+
+void drawIcon(const ModulePaintInfo& info, const std::wstring& asset, float extraTextW = 0.f,
+              const std::wstring& text = {}) {
+    ID2D1RenderTarget* rt = info.window.renderTarget();
+    if (!rt || !info.ctx.icons) return;
+
+    GfxColor tint = info.fg;
+    tint.a = static_cast<uint8_t>(tint.a * info.reveal);
+    if (ID2D1Bitmap* bmp = info.ctx.icons->get(rt, asset, kIconSize, tint)) {
+        const float iy = info.bounds.top + (info.bounds.height - kIconSize) * 0.5f;
+        info.window.drawBitmap(bmp, {info.bounds.left + kIconPadH, iy,
+                                     static_cast<float>(kIconSize), static_cast<float>(kIconSize)},
+                               info.reveal);
+    }
+
+    if (!text.empty() && info.ctx.font) {
+        const float size = static_cast<float>(info.ctx.fontSize);
+        const float x = info.bounds.left + kIconPadH + kIconSize + 6.f;
+        const float y = info.bounds.top + (info.bounds.height - size) * 0.5f;
+        info.window.drawText(*info.ctx.font, size, text, x, y, tint);
+    }
+    (void)extraTextW;
+}
+
+class SpacerModule : public IModule {
+public:
+    explicit SpacerModule(std::wstring id) : id_(std::move(id)) {}
+    std::wstring id() const override { return id_; }
+    GfxSize measure() const override { return {1.f, 1.f}; }
+    void paint(const ModulePaintInfo&) const override {}
+
+private:
+    std::wstring id_;
+};
+
+class TextModule : public IModule {
+public:
+    TextModule(std::wstring id, std::wstring text) : id_(std::move(id)), text_(std::move(text)) {}
+    std::wstring id() const override { return id_; }
+    std::wstring label() const override { return text_; }
+    GfxSize measure() const override { return measureText(*ctx_, text_); }
+    void paint(const ModulePaintInfo& info) const override { drawText(info, text_); }
+    void setContext(ModuleContext* ctx) { ctx_ = ctx; }
+
+private:
+    std::wstring id_, text_;
+    ModuleContext* ctx_{nullptr};
+};
+
+class ClockModule : public IModule {
+public:
+    explicit ClockModule(ModuleContext* ctx) : ctx_(ctx) { update(); }
+    std::wstring id() const override { return L"clock"; }
+    void tick() override { update(); }
+    GfxSize measure() const override { return measureText(*ctx_, text_); }
+    void paint(const ModulePaintInfo& info) const override { drawText(info, text_); }
+    bool layoutAffectsMeasure() const override { return true; }
+
+private:
+    ModuleContext* ctx_;
+    mutable std::wstring text_{L"--:--"};
+
+    void update() const {
+        std::time_t now = std::time(nullptr);
+        std::tm local{};
+        localtime_s(&local, &now);
+        wchar_t buf[128]{};
+        std::wcsftime(buf, 128, ctx_->config->clockFormat.c_str(), &local);
+        text_ = buf;
+    }
+};
+
+class ActivitiesModule : public IModule {
+public:
+    explicit ActivitiesModule(ModuleContext* ctx) : ctx_(ctx) {}
+    std::wstring id() const override { return L"activities"; }
+    bool interactive() const override { return true; }
+    GfxSize measure() const override { return measureIcon(*ctx_); }
+    void paint(const ModulePaintInfo& info) const override {
+        drawIcon(info, L"icons/activities.svg");
+    }
+    void onClick(const GfxVec2i&, const GfxRect&) override {
+        if (ctx_->host) ctx_->host->openActivities();
+    }
+
+private:
+    ModuleContext* ctx_;
+};
+
+class BatteryModule : public IModule {
+public:
+    explicit BatteryModule(ModuleContext* ctx) : ctx_(ctx) { tick(); }
+    std::wstring id() const override { return L"battery"; }
+    void tick() override {
+        BatteryStatus status{};
+        if (queryBatteryStatus(status)) status_ = status;
+    }
+    GfxSize measure() const override {
+        if (!status_.present || status_.percent < 0) return measureIcon(*ctx_);
+        text_ = std::to_wstring(status_.percent) + L"%";
+        const GfxSize textSz =
+            ctx_->window->measureText(*ctx_->font, static_cast<float>(ctx_->fontSize), text_);
+        return measureIcon(*ctx_, textSz.width + 6.f);
+    }
+    void paint(const ModulePaintInfo& info) const override {
+        const std::wstring icon =
+            status_.charging ? L"icons/battery-charging.svg" : L"icons/battery.svg";
+        drawIcon(info, icon, 0.f, status_.present && status_.percent >= 0 ? text_ : L"");
+    }
+    bool layoutAffectsMeasure() const override { return true; }
+
+private:
+    ModuleContext* ctx_;
+    BatteryStatus status_{};
+    mutable std::wstring text_;
+};
+
+class NetworkModule : public IModule {
+public:
+    explicit NetworkModule(ModuleContext* ctx) : ctx_(ctx) { tick(); }
+    std::wstring id() const override { return L"network"; }
+    void tick() override {
+        NetworkStatus status{};
+        if (queryNetworkStatus(status)) status_ = status;
+    }
+    GfxSize measure() const override { return measureIcon(*ctx_); }
+    void paint(const ModulePaintInfo& info) const override {
+        drawIcon(info, status_.connected ? L"icons/network.svg" : L"icons/network-offline.svg");
+    }
+
+private:
+    ModuleContext* ctx_;
+    NetworkStatus status_{};
+};
+
+class VolumeModule : public IModule {
+public:
+    explicit VolumeModule(ModuleContext* ctx) : ctx_(ctx) {}
+    std::wstring id() const override { return L"volume"; }
+    bool interactive() const override { return true; }
+    void tick() override {
+        if (!ctx_->audio) return;
+        muted_ = ctx_->audio->muted();
+        level_ = ctx_->audio->level();
+    }
+    GfxSize measure() const override { return measureIcon(*ctx_); }
+    void paint(const ModulePaintInfo& info) const override {
+        drawIcon(info, muted_ || level_ <= 0.01f ? L"icons/volume-muted.svg" : L"icons/volume.svg");
+    }
+    void onClick(const GfxVec2i&, const GfxRect&) override {
+        if (ctx_->audio) ctx_->audio->toggleMute();
+    }
+    void onScroll(const GfxVec2i&, float delta, const GfxRect&) override {
+        if (!ctx_->audio) return;
+        ctx_->audio->adjustLevel(delta > 0.f ? 0.05f : -0.05f);
+    }
+
+private:
+    ModuleContext* ctx_;
+    bool muted_{false};
+    float level_{0.f};
+};
+
+class SystemModule : public IModule {
+public:
+    explicit SystemModule(ModuleContext* ctx) : ctx_(ctx) {}
+    std::wstring id() const override { return L"system"; }
+    bool interactive() const override { return true; }
+    GfxSize measure() const override { return measureIcon(*ctx_); }
+    void paint(const ModulePaintInfo& info) const override { drawIcon(info, L"icons/power.svg"); }
+    void onClick(const GfxVec2i&, const GfxRect& bounds) override {
+        if (!ctx_->host) return;
+        if (ctx_->host->systemMenuVisible()) {
+            ctx_->host->hideSystemMenu();
+        } else {
+            ctx_->host->openSystemMenu(bounds);
+        }
+    }
+
+private:
+    ModuleContext* ctx_;
+};
+
+class StubModule : public IModule {
+public:
+    explicit StubModule(std::wstring id) : id_(std::move(id)) {}
+    std::wstring id() const override { return id_; }
+    GfxSize measure() const override { return {0.f, 0.f}; }
+    void paint(const ModulePaintInfo&) const override {}
+
+private:
+    std::wstring id_;
+};
 
 }  // namespace
 
-void Bar::markDirty() {
-    dirty_ = true;
+GfxColor toGfxColor(COLORREF color, uint8_t alpha) {
+    return gfxFromColorref(color, alpha);
 }
+
+std::unique_ptr<IModule> createModule(const std::wstring& name, ModuleContext* ctx) {
+    if (name == L"clock") return std::make_unique<ClockModule>(ctx);
+    if (name == L"spacer") return std::make_unique<SpacerModule>(name);
+    if (name == L"activities") return std::make_unique<ActivitiesModule>(ctx);
+    if (name == L"battery") return std::make_unique<BatteryModule>(ctx);
+    if (name == L"network") return std::make_unique<NetworkModule>(ctx);
+    if (name == L"volume") return std::make_unique<VolumeModule>(ctx);
+    if (name == L"system") return std::make_unique<SystemModule>(ctx);
+    if (name.rfind(L"text/", 0) == 0) {
+        auto m = std::make_unique<TextModule>(name, name.substr(5));
+        m->setContext(ctx);
+        return m;
+    }
+
+    if (name == L"tray" || name == L"workspaces") {
+        return std::make_unique<StubModule>(name);
+    }
+
+    auto m = std::make_unique<TextModule>(name, name);
+    m->setContext(ctx);
+    return m;
+}
+
+void Bar::markDirty() { dirty_ = true; }
 
 bool Bar::loadFont() {
-    const auto path = resolveFontFile(config_.font);
-    return font_.loadFromFile(path.string());
+    if (!window_.writeFactory()) return false;
+    return font_.create(window_.writeFactory(), config_.font);
 }
 
-void Bar::setupPopupActions() {
-    popup_.setOnScreenshot([] { sendWinShiftS(); });
-    popup_.setOnSettings([] {
-        ShellExecuteW(nullptr, L"open", L"ms-settings:", nullptr, nullptr, SW_SHOW);
-    });
-    popup_.setOnPower([] {
-        ShellExecuteW(nullptr, L"open", L"shutdown.exe", L"/l", nullptr, SW_HIDE);
-    });
-}
+int Bar::screenWidth() const { return primaryScreenWidth(); }
 
 bool Bar::create() {
     configPath_ = findConfigFile(L"bar.json");
     reloadConfig();
+
+    const int screenW = screenWidth();
+    if (!window_.create(L"WinGnome Bar", 0, 0, screenW, config_.height, true)) return false;
     if (!loadFont()) return false;
-
-    const int screenW = static_cast<int>(sf::VideoMode::getDesktopMode().width);
-    window_.create(sf::VideoMode(screenW, config_.height), "WinGnome Bar", sf::Style::None);
-    if (!window_.isOpen()) return false;
-
-    window_.setPosition(sf::Vector2i(0, 0));
-    window_.setVerticalSyncEnabled(config_.performance.vsync);
-    window_.setActive(false);
+    if (!popup_.create()) return false;
 
     applyTopmost();
 
-    if (!popup_.create(config_.height, screenW, config_)) return false;
-    setupPopupActions();
-
     ctx_.font = &font_;
+    ctx_.window = &window_;
+    ctx_.icons = &icons_;
+    ctx_.audio = &audio_;
+    ctx_.host = this;
     ctx_.fontSize = static_cast<unsigned>(config_.fontSize);
     ctx_.config = &config_;
     ctx_.barHeight = config_.height;
-    ctx_.popup = &popup_;
 
+    audio_.init();
     rebuildModules();
     tickModules();
-    frameClock_.restart();
-    animClock_.restart();
-    dataClock_.restart();
+
+    revealAnim_.snap(0.f);
+    revealAnim_.setTarget(1.f);
+
+    frameTimer_.restart();
+    animTimer_.restart();
+    dataTimer_.restart();
     dirty_ = true;
     layoutDirty_ = true;
     open_ = true;
@@ -104,34 +306,49 @@ bool Bar::create() {
 }
 
 void Bar::destroy() {
+    hideSystemMenu();
     popup_.destroy();
-    if (window_.isOpen()) window_.close();
+    audio_.shutdown();
+    icons_.clear();
+    window_.destroy();
+    font_.destroy();
     open_ = false;
-    captureModule_ = nullptr;
-    ctx_.popup = nullptr;
 }
 
-HWND Bar::hwnd() const {
-    return window_.isOpen() ? reinterpret_cast<HWND>(window_.getSystemHandle()) : nullptr;
-}
+HWND Bar::hwnd() const { return window_.hwnd(); }
 
 void Bar::applyTopmost() {
-    HWND native = reinterpret_cast<HWND>(window_.getSystemHandle());
-    if (!native) return;
-    const int screenW = GetSystemMetrics(SM_CXSCREEN);
-    LONG_PTR ex = GetWindowLongPtr(native, GWL_EXSTYLE);
-    SetWindowLongPtr(native, GWL_EXSTYLE, ex | WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
-    SetWindowPos(native, HWND_TOPMOST, 0, 0, screenW, config_.height, SWP_SHOWWINDOW);
+    window_.setTopmost(0, 0, screenWidth(), config_.height);
 }
 
 void Bar::reloadConfig() {
+    configPath_ = findConfigFile(L"bar.json");
+    const auto parsed = JsonParser::parseFile(configPath_);
+    if (!parsed || parsed->type() != JsonValue::Type::Object) {
+        configMarkReloaded(configWatch_, configPath_);
+        return;
+    }
+
     config_ = BarConfig::load(configPath_);
     ctx_.config = &config_;
     ctx_.barHeight = config_.height;
     ctx_.fontSize = static_cast<unsigned>(config_.fontSize);
-    if (window_.isOpen()) window_.setVerticalSyncEnabled(config_.performance.vsync);
+
+    if (open_) {
+        loadFont();
+        rebuildModules();
+        window_.resize(screenWidth(), config_.height);
+        applyTopmost();
+    }
+
+    configMarkReloaded(configWatch_, configPath_);
     layoutDirty_ = true;
     markDirty();
+}
+
+void Bar::checkConfigChanged() {
+    if (!configNeedsReload(configWatch_, L"bar.json")) return;
+    reloadConfig();
 }
 
 void Bar::rebuildModules() {
@@ -139,10 +356,9 @@ void Bar::rebuildModules() {
     center_.clear();
     right_.clear();
     layout_.clear();
+
     auto add = [&](const std::vector<std::wstring>& names, auto& store) {
-        for (const auto& n : names) {
-            store.push_back(createModule(n, &ctx_));
-        }
+        for (const auto& n : names) store.push_back(createModule(n, &ctx_));
     };
     add(config_.modulesLeft, left_);
     add(config_.modulesCenter, center_);
@@ -155,18 +371,17 @@ void Bar::tickModules() {
     for (const auto& m : left_) m->tick();
     for (const auto& m : center_) m->tick();
     for (const auto& m : right_) m->tick();
-    layoutDirty_ = true;
     markDirty();
 }
 
 void Bar::buildLayout() {
     layout_.clear();
-    const float totalW = static_cast<float>(window_.getSize().x);
-    const float h = static_cast<float>(window_.getSize().y);
+    const float totalW = static_cast<float>(screenWidth());
+    const float h = static_cast<float>(config_.height);
 
     auto sectionWidth = [&](const auto& mods) {
         float w = 0.f;
-        for (const auto& m : mods) w += m->measure().x;
+        for (const auto& m : mods) w += m->measure().width;
         return w;
     };
 
@@ -176,9 +391,9 @@ void Bar::buildLayout() {
 
     auto place = [&](float& x, const auto& mods) {
         for (const auto& m : mods) {
-            const sf::Vector2f sz = m->measure();
-            layout_.push_back({m.get(), {x, 0.f, sz.x, h}});
-            x += sz.x;
+            const GfxSize sz = m->measure();
+            layout_.push_back({m.get(), {x, 0.f, sz.width, h}});
+            x += sz.width;
         }
     };
 
@@ -188,17 +403,27 @@ void Bar::buildLayout() {
     layoutDirty_ = false;
 }
 
-Bar::PlacedModule* Bar::moduleAt(const sf::Vector2i& pos) {
-    if (layout_.empty()) buildLayout();
-    for (auto& placed : layout_) {
-        if (placed.bounds.contains(static_cast<float>(pos.x), static_cast<float>(pos.y)))
-            return &placed;
+GfxVec2i Bar::adjustedMousePos() const {
+    const float reveal = revealAnim_.value();
+    const float slideY = (1.f - reveal) * -static_cast<float>(config_.height);
+    GfxVec2i pos = window_.mousePos();
+    pos.y -= static_cast<int>(slideY);
+    return pos;
+}
+
+int Bar::moduleAt(const GfxVec2i& pos, float slideY) const {
+    for (size_t i = 0; i < layout_.size(); ++i) {
+        GfxRect bounds = layout_[i].bounds;
+        bounds.top += slideY;
+        if (bounds.contains(static_cast<float>(pos.x), static_cast<float>(pos.y))) {
+            return static_cast<int>(i);
+        }
     }
-    return nullptr;
+    return -1;
 }
 
 bool Bar::anyAnimating() const {
-    if (popup_.isAnimating()) return true;
+    if (!revealAnim_.settled()) return true;
     auto check = [](const auto& mods) {
         for (const auto& m : mods) {
             if (m->isAnimating()) return true;
@@ -208,19 +433,38 @@ bool Bar::anyAnimating() const {
     return check(left_) || check(center_) || check(right_);
 }
 
+void Bar::openSystemMenu(const GfxRect& anchor) {
+    popup_.show(anchor, config_.background, config_.foreground, config_.font, config_.fontSize);
+    markDirty();
+}
+
+void Bar::openActivities() { wingnome::openActivitiesOverview(); }
+
+bool Bar::systemMenuVisible() const { return popup_.isVisible(); }
+
+void Bar::hideSystemMenu() { popup_.hide(); }
+
 void Bar::updateModules() {
     if (layout_.empty() || layoutDirty_) buildLayout();
 
+    const float reveal = revealAnim_.value();
+    const float slideY = (1.f - reveal) * -static_cast<float>(config_.height);
+    const GfxVec2i mouse = adjustedMousePos();
+    const int hover = moduleAt(mouse, slideY);
+    if (hover != hoveredIndex_) {
+        hoveredIndex_ = hover;
+        markDirty();
+    }
+
     bool measureChanged = false;
-    for (auto& placed : layout_) {
-        ModuleInput input;
-        input.mousePos = mousePos_;
-        input.hovered = placed.bounds.contains(static_cast<float>(mousePos_.x),
-                                               static_cast<float>(mousePos_.y));
-        input.pressed = mouseDown_ && input.hovered;
-        input.dragging = mouseDown_;
-        placed.module->update(input, placed.bounds);
-        if (placed.module->layoutAffectsMeasure()) measureChanged = true;
+    for (size_t i = 0; i < layout_.size(); ++i) {
+        ModuleInput input{};
+        input.mousePos = mouse;
+        input.hovered = static_cast<int>(i) == hoveredIndex_;
+        input.pressed = input.hovered && window_.mouseDown();
+        input.wheelDelta = window_.mouseWheelDelta();
+        layout_[i].module->update(input, layout_[i].bounds);
+        if (layout_[i].module->layoutAffectsMeasure()) measureChanged = true;
     }
 
     if (measureChanged) layoutDirty_ = true;
@@ -229,74 +473,65 @@ void Bar::updateModules() {
 bool Bar::render() {
     if (layoutDirty_) buildLayout();
 
-    window_.clear(toSfColor(config_.background));
-    const sf::Color fg = toSfColor(config_.foreground);
+    const float reveal = revealAnim_.value();
+    const float slideY = (1.f - reveal) * -static_cast<float>(config_.height);
 
-    for (const auto& placed : layout_) {
-        ModulePaintInfo info{window_, ctx_, placed.bounds, fg};
+    GfxColor bg = toGfxColor(config_.background);
+    if (!window_.beginDraw(bg)) return false;
+
+    const GfxColor fg = toGfxColor(config_.foreground);
+
+    for (size_t i = 0; i < layout_.size(); ++i) {
+        const auto& placed = layout_[i];
+        GfxRect bounds = placed.bounds;
+        bounds.top += slideY;
+        ModulePaintInfo info{window_, ctx_, bounds, fg, reveal, static_cast<int>(i) == hoveredIndex_};
         placed.module->paint(info);
     }
-    window_.display();
 
-    if (popup_.isVisible()) popup_.render();
+    window_.endDraw();
     return true;
 }
 
 bool Bar::pollEvents() {
-    bool activity = false;
+    const bool activity = window_.pollEvents();
+    const float reveal = revealAnim_.value();
+    const float slideY = (1.f - reveal) * -static_cast<float>(config_.height);
+    const GfxVec2i mouse = adjustedMousePos();
 
-    if (popup_.isVisible()) activity |= popup_.pollEvents();
-
-    sf::Event event{};
-    while (window_.pollEvent(event)) {
-        activity = true;
-        markDirty();
-
-        if (event.type == sf::Event::Closed) {
-            open_ = false;
-            PostQuitMessage(0);
-            continue;
-        }
-        if (event.type == sf::Event::Resized) layoutDirty_ = true;
-
-        if (event.type == sf::Event::MouseMoved) {
-            mousePos_ = {event.mouseMove.x, event.mouseMove.y};
-        }
-        if (event.type == sf::Event::MouseButtonPressed &&
-            event.mouseButton.button == sf::Mouse::Left) {
-            mouseDown_ = true;
-            mousePos_ = {event.mouseButton.x, event.mouseButton.y};
-            if (auto* placed = moduleAt(mousePos_)) {
-                if (placed->module->interactive()) {
-                    captureModule_ = placed->module;
-                    placed->module->onClick(mousePos_, placed->bounds);
-                }
-            }
-        }
-        if (event.type == sf::Event::MouseButtonReleased &&
-            event.mouseButton.button == sf::Mouse::Left) {
-            mouseDown_ = false;
-            captureModule_ = nullptr;
-        }
-        if (event.type == sf::Event::MouseWheelScrolled) {
-            mousePos_ = sf::Mouse::getPosition(window_);
-            if (auto* placed = moduleAt(mousePos_)) {
-                if (placed->module->interactive())
-                    placed->module->onScroll(mousePos_, event.mouseWheelScroll.delta, placed->bounds);
-            }
+    if (popup_.isVisible() && window_.mouseClicked()) {
+        const int idx = moduleAt(mouse, slideY);
+        if (idx < 0 || !layout_[static_cast<size_t>(idx)].module->interactive() ||
+            layout_[static_cast<size_t>(idx)].module->id() != L"system") {
+            hideSystemMenu();
         }
     }
 
-    if (mouseDown_ && captureModule_) {
-        activity = true;
+    if (window_.mouseClicked()) {
+        const int idx = moduleAt(mouse, slideY);
+        if (idx >= 0) {
+            auto& placed = layout_[static_cast<size_t>(idx)];
+            GfxRect bounds = placed.bounds;
+            bounds.top += slideY;
+            placed.module->onClick(mouse, bounds);
+        }
+        window_.clearMouseClicked();
         markDirty();
-        for (auto& placed : layout_) {
-            if (placed.module == captureModule_) {
-                ModuleInput input{mousePos_, true, true, true};
-                placed.module->update(input, placed.bounds);
-                break;
+    }
+
+    const short wheel = window_.mouseWheelDelta();
+    if (wheel != 0) {
+        const int idx = moduleAt(mouse, slideY);
+        if (idx >= 0) {
+            auto& placed = layout_[static_cast<size_t>(idx)];
+            if (placed.module->interactive()) {
+                GfxRect bounds = placed.bounds;
+                bounds.top += slideY;
+                placed.module->onScroll(mouse, static_cast<float>(wheel), bounds);
+                markDirty();
             }
         }
+        window_.clearMouseWheelDelta();
     }
 
     return activity;
@@ -308,32 +543,47 @@ bool Bar::processFrame() {
         return false;
     }
 
+    checkConfigChanged();
+
+    const bool popupActive = popup_.processFrame();
     const bool hadInput = pollEvents();
 
-    if (dataClock_.getElapsedTime().asMilliseconds() >= config_.performance.dataTickMs) {
+    if (dataTimer_.elapsedMilliseconds() >= config_.performance.dataTickMs) {
         tickModules();
-        dataClock_.restart();
+        dataTimer_.restart();
     }
-
-    const bool popupActive = popup_.isVisible() || popup_.isAnimating();
-    if (popupActive) popup_.processFrame(ctx_.deltaTime);
 
     const bool animating = anyAnimating();
-    if (animating || hadInput || mouseDown_ || popupActive) {
-        ctx_.deltaTime = animClock_.restart().asSeconds();
-        updateModules();
+    const float delta = static_cast<float>(animTimer_.elapsedSeconds());
+    animTimer_.restart();
+    ctx_.deltaTime = delta;
+
+    if (!revealAnim_.settled()) {
+        revealAnim_.update(delta, 320.f);
+        markDirty();
     }
 
-    if (!dirty_ && !animating && !hadInput && !mouseDown_ && !popupActive) return false;
+    if (animating || hadInput || popupActive) updateModules();
 
-    const int animFps = std::max(1, config_.performance.animFps);
+    if (!dirty_ && !animating && !hadInput && !popupActive) return false;
+
+    const int animFps = std::max(60, std::max(1, config_.performance.animFps));
     const float minFrame = 1.f / static_cast<float>(animFps);
-    if ((animating || popupActive) && frameClock_.getElapsedTime().asSeconds() < minFrame) return true;
+    if (animating && frameTimer_.elapsedSeconds() < minFrame) return true;
 
-    frameClock_.restart();
+    frameTimer_.restart();
     render();
-    dirty_ = animating || mouseDown_ || popupActive;
-    return dirty_ || hadInput;
+    dirty_ = animating || popupActive;
+    return dirty_ || hadInput || popupActive;
+}
+
+HWND Bar::popupHwnd() const { return popup_.hwnd(); }
+
+void Bar::handleMouseWheel(short delta, const POINT& screenPos) {
+    POINT client = screenPos;
+    ScreenToClient(window_.hwnd(), &client);
+    window_.injectMouseWheel(delta, {client.x, client.y});
+    markDirty();
 }
 
 }  // namespace wingnome
