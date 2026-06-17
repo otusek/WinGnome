@@ -9,15 +9,15 @@ A custom **Windows 11** shell inspired by GNOME. Replaces the default `explorer.
 WinGnome provides a minimal, extensible graphical shell:
 
 - **Desktop** — fullscreen desktop window below the bar
-- **Wallpaper** — system wallpaper or a custom image path
+- **Activities overwiew** - I can't remember what it was called, the thing from GNOME
 - **Bar** — configurable top panel (modules: clock, battery, network, volume, etc.)
 - **Dock** — Dash to Dock-style bottom panel (pinned and running apps, autohide)
 
-The project is in MVP stage — next steps are desktop icons, a context menu, and full Explorer replacement.
+The project is pre alpha stage, it is **NOT** currently usable.
 
 ## Requirements
 
-- Windows 11 (also works on Windows 10)
+- Windows 11 (it SHOULD work on Windows 10 aswell)
 - [Visual Studio 2022](https://visualstudio.microsoft.com/) with the **Desktop development with C++** workload
 - [CMake](https://cmake.org/download/) 3.16+
 - Windows SDK 10.0.26100 or newer
