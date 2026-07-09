@@ -16,6 +16,10 @@ WinGnome provides a minimal, extensible graphical shell:
 
 The project is in **pre-alpha** stage and is not production-ready yet.
 
+## Project status
+
+**Development is currently on hold.** I'm on vacation and spending most of my time with my family about 200 km away from my dev machine, so issues and pull requests may sit for a while. I'll pick things back up when I'm home again.
+
 ## Requirements
 
 - Windows 11 (should also work on Windows 10)
